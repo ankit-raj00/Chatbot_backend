@@ -223,18 +223,23 @@ class ChatController:
             })
 
             # Convert history to Gemini format
+            # Convert history to Gemini format
             contents = []
             for msg in messages_list:
                 role = "user" if msg["role"] == "user" else "model"
-                parts = [types.Part.from_text(text=msg["content"])]
+                parts = []
+                if msg.get("content"):
+                    parts.append(types.Part.from_text(text=msg["content"]))
                 
                 # Add attachments if present
                 if "attachments" in msg and msg["attachments"]:
                     for attachment in msg["attachments"]:
                         try:
-                            if "gemini_uri" in attachment:
+                            # Support both 'uri' (new) and 'gemini_uri' (old)
+                            file_uri = attachment.get("uri") or attachment.get("gemini_uri")
+                            if file_uri:
                                 parts.append(types.Part.from_uri(
-                                    file_uri=attachment["gemini_uri"],
+                                    file_uri=file_uri,
                                     mime_type=attachment["mime_type"]
                                 ))
                             elif "data" in attachment:
@@ -248,7 +253,8 @@ class ChatController:
                         except Exception as e:
                             print(f"Failed to add attachment to history: {e}")
                 
-                contents.append(types.Content(role=role, parts=parts))
+                if parts:
+                    contents.append(types.Content(role=role, parts=parts))
             
             
             # Call Gemini with streaming and manual tool handling
