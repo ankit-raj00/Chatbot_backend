@@ -1,4 +1,8 @@
-from fastmcp import Client
+try:
+    from fastmcp import Client
+except ImportError:
+    Client = Any  # Fallback for type hints if library missing
+
 from typing import Dict, Optional, List, Any
 import asyncio
 from contextlib import AsyncExitStack

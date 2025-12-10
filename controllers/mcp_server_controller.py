@@ -3,7 +3,10 @@ from core.database import mcp_servers_collection
 from models.mcp_server import MCPServerCreate, MCPServerUpdate
 from datetime import datetime
 from bson import ObjectId
-from fastmcp import Client
+try:
+    from fastmcp import Client
+except ImportError:
+    Client = None
 
 class MCPServerController:
     """Controller for MCP server operations"""
