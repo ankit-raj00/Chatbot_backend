@@ -174,19 +174,41 @@ class MCPServerController:
                     detail="Server not found"
                 )
             
-            # Try to connect to MCP server
+            # Try to connect to MCP server using connection manager
             try:
-                client = Client(server["url"])
-                async with client:
-                    tools = await client.list_tools()
+                from utils.mcp_connection_manager import mcp_manager
+                
+                # Use connection manager to get or create connection
+                server_url = server["url"]
+                
+                # Try to connect
+                await mcp_manager.connect(server_url)
+                
+                # Get tools from the connection
+                tools = mcp_manager.get_tools_for_server(server_url)
+                
+                if tools:
                     return {
                         "status": "connected",
-                        "tools": [{"name": tool.name, "description": tool.description} for tool in tools]
+                        "tools": [{"name": tool.function_declarations[0].name if hasattr(tool, 'function_declarations') and tool.function_declarations else "unknown", 
+                                   "description": tool.function_declarations[0].description if hasattr(tool, 'function_declarations') and tool.function_declarations else ""} 
+                                  for tool in tools]
+                    }
+                else:
+                    return {
+                        "status": "connected",
+                        "tools": [],
+                        "message": "Connected but no tools available"
                     }
             except Exception as e:
+                error_msg = str(e)
+                # Provide more helpful error messages
+                if "Connection closed" in error_msg or "Connection refused" in error_msg:
+                    error_msg = "MCP server is not running or not accessible. This is normal in serverless environments. The server will auto-connect when used in a chat."
+                
                 return {
                     "status": "error",
-                    "error": str(e),
+                    "error": error_msg,
                     "tools": []
                 }
         except HTTPException:

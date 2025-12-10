@@ -57,87 +57,56 @@ async def log_requests(request: Request, call_next):
         print(f"Request failed: {request.method} {request.url} - Error: {str(e)}")
         raise e
 
-# Startup event to initialize local MCP server
+# Startup event to initialize native tools
 @app.on_event("startup")
 async def startup_event():
-    # --- Safe Startup Wrapper ---
+    """Initialize native tools on startup"""
     try:
-        from core.database import mcp_servers_collection
-        from utils.mcp_connection_manager import mcp_manager
-        import pathlib
+        from core.database import tools_collection
+        from tools import get_all_tools
+        from datetime import datetime
         
-        # Get local MCP server path
-        local_mcp_path = str(pathlib.Path(__file__).parent / "services" / "mcp_server.py")
+        print("="*60)
+        print("INITIALIZING NATIVE TOOLS")
+        print("="*60)
         
-        # Check if local MCP server exists in database (by unique server_id, not path)
-        existing = await mcp_servers_collection.find_one({"server_id": "local_demo_server"})
-        
-        if not existing:
-            # Add local MCP server to database
-            local_server = {
-                "server_id": "local_demo_server",  # Unique identifier
-                "name": "Local Demo Server",
-                "url": local_mcp_path,
-                "description": "Local MCP server with demo tools (roll_dice, get_weather)",
-                "is_local": True,
-                "created_at": datetime.now(),
-                "updated_at": datetime.now()
-            }
-            await mcp_servers_collection.insert_one(local_server)
-            print(f"✅ Added local MCP server to database: {local_mcp_path}")
-        else:
-            # Update path if it changed (local vs Vercel)
-            if existing["url"] != local_mcp_path:
-                await mcp_servers_collection.update_one(
-                    {"server_id": "local_demo_server"},
-                    {"$set": {"url": local_mcp_path, "updated_at": datetime.now()}}
-                )
-                print(f"✅ Updated local MCP server path: {local_mcp_path}")
-        
-        # Pre-connect to local MCP server
-        print(f"🔌 Pre-connecting to local MCP server...")
-        # In Vercel, subprocess execution might fail, so we catch it
+        # Create unique index on tool_id
         try:
-            await mcp_manager.connect(local_mcp_path)
-            print(f"✅ Local MCP server ready")
+            await tools_collection.create_index("tool_id", unique=True, sparse=True)
+            print("✅ Created unique index on tool_id")
         except Exception as e:
-            print(f"⚠️ Failed to connect to local MCP server (expected in Vercel): {e}")
+            print(f"ℹ️  Index already exists: {e}")
+        
+        # Register all native tools
+        tools_registered = 0
+        for tool in get_all_tools():
+            try:
+                await tools_collection.update_one(
+                    {"tool_id": tool.name},
+                    {"$set": {
+                        "tool_id": tool.name,
+                        "name": tool.name,
+                        "description": tool.description,
+                        "category": tool.category,
+                        "requires_auth": tool.requires_auth,
+                        "is_enabled": True,
+                        "updated_at": datetime.now()
+                    }},
+                    upsert=True
+                )
+                tools_registered += 1
+                print(f"  ✓ {tool.name}")
+            except Exception as e:
+                print(f"  ✗ Failed to register {tool.name}: {e}")
+        
+        print(f"\n✅ Registered {tools_registered} native tools")
+        print("="*60)
+        
+    except Exception as e:
+        print(f"⚠️  Startup error: {e}")
+        # Don't fail startup if tools registration fails
+        pass
 
-        # --- Google Drive MCP Server ---
-        drive_mcp_path = str(pathlib.Path(__file__).parent / "services" / "google_drive_server.py")
-        
-        # Check if Drive MCP server exists (by unique server_id)
-        existing_drive = await mcp_servers_collection.find_one({"server_id": "google_drive_mcp"})
-        
-        if not existing_drive:
-            # Add Drive MCP server to database
-            drive_server = {
-                "server_id": "google_drive_mcp",  # Unique identifier
-                "name": "Google Drive MCP",
-                "url": drive_mcp_path,
-                "description": "Google Drive integration (List folders, Create folders)",
-                "is_local": True,
-                "created_at": datetime.now(),
-                "updated_at": datetime.now()
-            }
-            await mcp_servers_collection.insert_one(drive_server)
-            print(f"✅ Added Google Drive MCP server to database: {drive_mcp_path}")
-        else:
-            # Update path if it changed (local vs Vercel)
-            if existing_drive["url"] != drive_mcp_path:
-                await mcp_servers_collection.update_one(
-                    {"server_id": "google_drive_mcp"},
-                    {"$set": {"url": drive_mcp_path, "updated_at": datetime.now()}}
-                )
-                print(f"✅ Updated Google Drive MCP server path: {drive_mcp_path}")
-        
-        # Pre-connect to Drive MCP server
-        print(f"🔌 Pre-connecting to Google Drive MCP server...")
-        try:
-            await mcp_manager.connect(drive_mcp_path)
-            print(f"✅ Google Drive MCP server ready")
-        except Exception as e:
-            print(f"⚠️ Failed to connect to Drive MCP server (expected in Vercel): {e}")
             
     except Exception as e:
         print(f"❌ Critical Error in Startup Event: {e}")
