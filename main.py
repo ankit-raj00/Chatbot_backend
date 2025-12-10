@@ -69,12 +69,13 @@ async def startup_event():
         # Get local MCP server path
         local_mcp_path = str(pathlib.Path(__file__).parent / "services" / "mcp_server.py")
         
-        # Check if local MCP server exists in database
-        existing = await mcp_servers_collection.find_one({"url": local_mcp_path})
+        # Check if local MCP server exists in database (by unique server_id, not path)
+        existing = await mcp_servers_collection.find_one({"server_id": "local_demo_server"})
         
         if not existing:
             # Add local MCP server to database
             local_server = {
+                "server_id": "local_demo_server",  # Unique identifier
                 "name": "Local Demo Server",
                 "url": local_mcp_path,
                 "description": "Local MCP server with demo tools (roll_dice, get_weather)",
@@ -84,6 +85,14 @@ async def startup_event():
             }
             await mcp_servers_collection.insert_one(local_server)
             print(f"✅ Added local MCP server to database: {local_mcp_path}")
+        else:
+            # Update path if it changed (local vs Vercel)
+            if existing["url"] != local_mcp_path:
+                await mcp_servers_collection.update_one(
+                    {"server_id": "local_demo_server"},
+                    {"$set": {"url": local_mcp_path, "updated_at": datetime.now()}}
+                )
+                print(f"✅ Updated local MCP server path: {local_mcp_path}")
         
         # Pre-connect to local MCP server
         print(f"🔌 Pre-connecting to local MCP server...")
@@ -97,12 +106,13 @@ async def startup_event():
         # --- Google Drive MCP Server ---
         drive_mcp_path = str(pathlib.Path(__file__).parent / "services" / "google_drive_server.py")
         
-        # Check if Drive MCP server exists
-        existing_drive = await mcp_servers_collection.find_one({"url": drive_mcp_path})
+        # Check if Drive MCP server exists (by unique server_id)
+        existing_drive = await mcp_servers_collection.find_one({"server_id": "google_drive_mcp"})
         
         if not existing_drive:
             # Add Drive MCP server to database
             drive_server = {
+                "server_id": "google_drive_mcp",  # Unique identifier
                 "name": "Google Drive MCP",
                 "url": drive_mcp_path,
                 "description": "Google Drive integration (List folders, Create folders)",
@@ -112,6 +122,14 @@ async def startup_event():
             }
             await mcp_servers_collection.insert_one(drive_server)
             print(f"✅ Added Google Drive MCP server to database: {drive_mcp_path}")
+        else:
+            # Update path if it changed (local vs Vercel)
+            if existing_drive["url"] != drive_mcp_path:
+                await mcp_servers_collection.update_one(
+                    {"server_id": "google_drive_mcp"},
+                    {"$set": {"url": drive_mcp_path, "updated_at": datetime.now()}}
+                )
+                print(f"✅ Updated Google Drive MCP server path: {drive_mcp_path}")
         
         # Pre-connect to Drive MCP server
         print(f"🔌 Pre-connecting to Google Drive MCP server...")
