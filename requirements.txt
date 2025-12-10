@@ -16,3 +16,4 @@ python-multipart
 requests
 dnspython
 pydantic[email]
+Pillow
