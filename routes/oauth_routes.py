@@ -24,12 +24,21 @@ async def google_oauth_callback(
     state: str = Query(...)
 ):
     """Handle Google OAuth callback for Drive access"""
-    redirect_uri = "http://localhost:8000/oauth/google/callback"
+    import os
+    
+    # Get backend URL for callback (prod) or default to localhost (dev)
+    # Vercel provides VERCEL_URL, but it doesn't include https://
+    backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
+    redirect_uri = f"{backend_url}/oauth/google/callback"
     
     result = await GoogleOAuthController.handle_callback(code=code, state=state, redirect_uri=redirect_uri)
     
-    # Redirect to frontend MCP servers page
-    return RedirectResponse(url="http://localhost:3000/mcp-servers?google_auth=success")
+    # Redirect to frontend
+    frontend_url = os.getenv("FRONTEND_URL")
+    if frontend_url:
+        return RedirectResponse(url=f"{frontend_url}/mcp-servers?google_auth=success")
+    else:
+        return {"status": "success", "message": "Google Drive connected successfully (Backend Only Mode)"}
 
 @router.get("/authorize/{server_id}")
 async def initiate_oauth(
