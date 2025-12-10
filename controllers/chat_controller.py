@@ -433,63 +433,51 @@ class ChatController:
             # Process images/files
             user_parts = [types.Part.from_text(text=message)]
             attachments = []
-            temp_files = []
-
+            
             if images:
                 import tempfile
-                from utils.gemini_files import GeminiFiles
-                
-                gemini_files = GeminiFiles(self.gemini_client)
                 
                 for image in images:
                     try:
                         # Save to temp file
-                        suffix = os.path.splitext(image.filename)[1]
+                        suffix = "." + image.filename.split(".")[-1] if "." in image.filename else ""
                         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                             content = await image.read()
                             tmp.write(content)
                             tmp_path = tmp.name
-                            temp_files.append(tmp_path)
                         
-                        # Upload to Gemini
-                        print(f"Uploading {image.filename} to Gemini Files API...")
-                        uploaded_file = await gemini_files.upload_file(tmp_path, mime_type=image.content_type)
-                        print(f"Uploaded: {uploaded_file.uri}")
+                        print(f"Uploading file: {image.filename} to Gemini Files API...")
+                        # Upload to Gemini using standard client
+                        gemini_file = self.gemini_client.files.upload(file=tmp_path)
+                        print(f"Uploaded: {gemini_file.name}")
                         
-                        # Add to parts
+                        # Add to parts for current message
                         user_parts.append(types.Part.from_uri(
-                            file_uri=uploaded_file.uri,
-                            mime_type=uploaded_file.mime_type
+                            file_uri=gemini_file.uri,
+                            mime_type=gemini_file.mime_type
                         ))
                         
-                        # Reset cursor for base64 encoding (for DB/Frontend)
-                        await image.seek(0)
-                        
-                        # Encode for storage/frontend
-                        base64_data, mime_type = await FileHandler.encode_image_to_base64(image)
+                        # Store metadata for DB
                         attachments.append({
-                            "type": "image" if mime_type.startswith("image/") else "file",
-                            "mime_type": mime_type,
-                            "data": base64_data,
-                            "filename": image.filename,
-                            "gemini_uri": uploaded_file.uri
+                            "type": "file",
+                            "mime_type": gemini_file.mime_type,
+                            "uri": gemini_file.uri,
+                            "name": gemini_file.name,
+                            "original_name": image.filename
                         })
+                        
+                        # Cleanup temp file
+                        os.unlink(tmp_path)
+                        
                     except Exception as e:
                         print(f"Failed to process file {image.filename}: {e}")
-            
-            # Clean up temp files
-            for path in temp_files:
-                try:
-                    os.unlink(path)
-                except:
-                    pass
             
             # Get or create conversation
             if not conversation_id:
                 new_conv = {
                     "user_id": user_id,
                     "title": message[:50],
-                    "mcp_server_url": mcp_server_url,
+                    "mcp_server_urls": mcp_server_urls,
                     "created_at": datetime.now(),
                     "updated_at": datetime.now()
                 }
@@ -527,32 +515,30 @@ class ChatController:
             # Convert history to Gemini format (including current message implicitly if we re-fetch, but we'll append current manually)
             # Actually, we should include previous messages + current message
             
+            # Convert history to Gemini format
             contents = []
             for msg in messages_list:
                 role = "user" if msg["role"] == "user" else "model"
-                parts = [types.Part.from_text(text=msg["content"])]
+                parts = []
+                if msg.get("content"):
+                    parts.append(types.Part.from_text(text=msg["content"]))
                 
-                # Add attachments if present
+                # Add attachments if present (Files API context)
                 if "attachments" in msg and msg["attachments"]:
-                    for attachment in msg["attachments"]:
+                    for att in msg["attachments"]:
                         try:
-                            if "gemini_uri" in attachment:
+                            # Support both 'uri' (new) and 'gemini_uri' (old)
+                            file_uri = att.get("uri") or att.get("gemini_uri")
+                            if file_uri:
                                 parts.append(types.Part.from_uri(
-                                    file_uri=attachment["gemini_uri"],
-                                    mime_type=attachment["mime_type"]
-                                ))
-                            elif "data" in attachment:
-                                # Fallback for older messages with base64
-                                import base64
-                                data_bytes = base64.b64decode(attachment["data"])
-                                parts.append(types.Part.from_bytes(
-                                    data=data_bytes,
-                                    mime_type=attachment["mime_type"]
+                                    file_uri=file_uri,
+                                    mime_type=att["mime_type"]
                                 ))
                         except Exception as e:
                             print(f"Failed to add attachment to history: {e}")
                 
-                contents.append(types.Content(role=role, parts=parts))
+                if parts:
+                    contents.append(types.Content(role=role, parts=parts))
             
             
             # Call Gemini with streaming and multimodal support
