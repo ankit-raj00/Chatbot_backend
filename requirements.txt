@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+motor
+pymongo
+python-dotenv
+python-jose[cryptography]
+passlib[bcrypt]
+bcrypt
+google-genai
+fastmcp
+google-auth-oauthlib
+google-api-python-client
+google-auth-httplib2
+python-multipart
+requests
