@@ -14,7 +14,10 @@ class ChatController:
     
     def __init__(self):
         # Initialize Gemini Client
-        api_key = os.getenv("GEMINI_API_KEY", "AIzaSyBU-4y8LmHJwzxOZNHsAdbvidILliJfZQo")
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            yield f"data: {json.dumps({'error': 'GEMINI_API_KEY not set'})}\n\n"
+            return
         self.gemini_client = genai.Client(api_key=api_key)
         
         # Initialize MCP Client (Local) with absolute path

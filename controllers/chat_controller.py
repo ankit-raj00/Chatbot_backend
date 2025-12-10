@@ -14,7 +14,9 @@ class ChatController:
     
     def __init__(self):
         # Initialize Gemini Client
-        api_key = os.getenv("GEMINI_API_KEY", "AIzaSyBU-4y8LmHJwzxOZNHsAdbvidILliJfZQo")
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY environment variable not set")
         self.gemini_client = genai.Client(api_key=api_key)
         
         # MCP connections are now managed by the global mcp_manager
