@@ -17,3 +17,4 @@ requests
 dnspython
 pydantic[email]
 Pillow
+cloudinary

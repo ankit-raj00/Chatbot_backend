@@ -222,9 +222,14 @@ class ChatController:
                 "timestamp": datetime.now()
             })
 
-            # Convert history to Gemini format
-            # Convert history to Gemini format
+            # Convert history to Gemini format with auto re-upload for expired files
+            from utils.file_expiry import is_gemini_file_expired
+            from utils.cloudinary_handler import CloudinaryHandler
+            
             contents = []
+            cloudinary_handler = CloudinaryHandler()
+            files_to_update = []  # Track files that need DB updates
+            
             for msg in messages_list:
                 role = "user" if msg["role"] == "user" else "model"
                 parts = []
@@ -235,11 +240,44 @@ class ChatController:
                 if "attachments" in msg and msg["attachments"]:
                     for attachment in msg["attachments"]:
                         try:
-                            # Support both 'uri' (new) and 'gemini_uri' (old)
-                            file_uri = attachment.get("uri") or attachment.get("gemini_uri")
-                            if file_uri:
+                            # Check if Gemini file has expired
+                            gemini_uploaded_at = attachment.get("gemini_uploaded_at")
+                            gemini_uri = attachment.get("gemini_uri") or attachment.get("uri")
+                            cloudinary_url = attachment.get("cloudinary_url")
+                            
+                            # If file expired and we have Cloudinary backup, re-upload
+                            if gemini_uploaded_at and is_gemini_file_expired(gemini_uploaded_at) and cloudinary_url:
+                                print(f"⚠️ Gemini file expired for {attachment.get('original_name')}. Re-uploading from Cloudinary...")
+                                
+                                # Download from Cloudinary
+                                tmp_path = cloudinary_handler.download_file(cloudinary_url)
+                                
+                                try:
+                                    # Re-upload to Gemini Files API
+                                    gemini_file = self.gemini_client.files.upload(file=tmp_path)
+                                    print(f"✅ Re-uploaded to Gemini: {gemini_file.uri}")
+                                    
+                                    # Update attachment metadata
+                                    attachment["gemini_uri"] = gemini_file.uri
+                                    attachment["gemini_name"] = gemini_file.name
+                                    attachment["gemini_uploaded_at"] = datetime.now()
+                                    
+                                    # Track for DB update
+                                    files_to_update.append({
+                                        "message_id": msg["_id"],
+                                        "attachment": attachment
+                                    })
+                                    
+                                    gemini_uri = gemini_file.uri
+                                finally:
+                                    # Cleanup temp file
+                                    if os.path.exists(tmp_path):
+                                        os.unlink(tmp_path)
+                            
+                            # Add file to parts
+                            if gemini_uri:
                                 parts.append(types.Part.from_uri(
-                                    file_uri=file_uri,
+                                    file_uri=gemini_uri,
                                     mime_type=attachment["mime_type"]
                                 ))
                             elif "data" in attachment:
@@ -255,6 +293,16 @@ class ChatController:
                 
                 if parts:
                     contents.append(types.Content(role=role, parts=parts))
+            
+            # Update MongoDB with new Gemini URIs for re-uploaded files
+            for update_info in files_to_update:
+                try:
+                    await messages_collection.update_one(
+                        {"_id": update_info["message_id"]},
+                        {"$set": {"attachments": [update_info["attachment"]]}}
+                    )
+                except Exception as e:
+                    print(f"Failed to update message with new Gemini URI: {e}")
             
             
             # Call Gemini with streaming and manual tool handling
@@ -436,14 +484,19 @@ class ChatController:
                 yield f"data: {json.dumps({'error': 'Selected model does not support images'})}\n\n"
                 return
             
-            # Process images/files
+            
+            # Process images/files with dual upload (Cloudinary + Gemini)
             user_parts = [types.Part.from_text(text=message)]
             attachments = []
             
             if images:
                 import tempfile
+                from utils.cloudinary_handler import CloudinaryHandler
+                
+                cloudinary_handler = CloudinaryHandler()
                 
                 for image in images:
+                    tmp_path = None
                     try:
                         # Save to temp file
                         suffix = "." + image.filename.split(".")[-1] if "." in image.filename else ""
@@ -452,10 +505,15 @@ class ChatController:
                             tmp.write(content)
                             tmp_path = tmp.name
                         
-                        print(f"Uploading file: {image.filename} to Gemini Files API...")
-                        # Upload to Gemini using standard client
+                        # 1. Upload to Cloudinary (permanent storage)
+                        print(f"Uploading {image.filename} to Cloudinary...")
+                        cloudinary_url, cloudinary_public_id = cloudinary_handler.upload_file(tmp_path)
+                        print(f"Cloudinary URL: {cloudinary_url}")
+                        
+                        # 2. Upload to Gemini Files API (48h context)
+                        print(f"Uploading {image.filename} to Gemini Files API...")
                         gemini_file = self.gemini_client.files.upload(file=tmp_path)
-                        print(f"Uploaded: {gemini_file.name}")
+                        print(f"Gemini URI: {gemini_file.uri}")
                         
                         # Add to parts for current message
                         user_parts.append(types.Part.from_uri(
@@ -463,20 +521,28 @@ class ChatController:
                             mime_type=gemini_file.mime_type
                         ))
                         
-                        # Store metadata for DB
+                        # Store metadata for DB (both Cloudinary and Gemini info)
                         attachments.append({
                             "type": "file",
+                            "original_name": image.filename,
                             "mime_type": gemini_file.mime_type,
-                            "uri": gemini_file.uri,
-                            "name": gemini_file.name,
-                            "original_name": image.filename
+                            "size_bytes": gemini_file.size_bytes,
+                            "cloudinary_url": cloudinary_url,
+                            "cloudinary_public_id": cloudinary_public_id,
+                            "gemini_uri": gemini_file.uri,
+                            "gemini_name": gemini_file.name,
+                            "gemini_uploaded_at": datetime.now()
                         })
-                        
-                        # Cleanup temp file
-                        os.unlink(tmp_path)
                         
                     except Exception as e:
                         print(f"Failed to process file {image.filename}: {e}")
+                    finally:
+                        # Cleanup temp file
+                        if tmp_path and os.path.exists(tmp_path):
+                            try:
+                                os.unlink(tmp_path)
+                            except:
+                                pass
             
             # Get or create conversation
             if not conversation_id:
