@@ -1,5 +1,8 @@
 from fastapi import HTTPException
-from fastmcp import Client
+try:
+    from fastmcp import Client
+except ImportError:
+    Client = None
 from contextlib import AsyncExitStack
 
 class MCPController:
