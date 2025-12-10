@@ -56,58 +56,72 @@ async def log_requests(request: Request, call_next):
 # Startup event to initialize local MCP server
 @app.on_event("startup")
 async def startup_event():
-    """Initialize local MCP server in database"""
-    from core.database import mcp_servers_collection
-    from utils.mcp_connection_manager import mcp_manager
-    import pathlib
-    
-    # Get local MCP server path
-    local_mcp_path = str(pathlib.Path(__file__).parent / "services" / "mcp_server.py")
-    
-    # Check if local MCP server exists in database
-    existing = await mcp_servers_collection.find_one({"url": local_mcp_path})
-    
-    if not existing:
-        # Add local MCP server to database
-        local_server = {
-            "name": "Local Demo Server",
-            "url": local_mcp_path,
-            "description": "Local MCP server with demo tools (roll_dice, get_weather)",
-            "is_local": True,
-            "created_at": datetime.now(),
-            "updated_at": datetime.now()
-        }
-        result = await mcp_servers_collection.insert_one(local_server)
-        print(f"✅ Added local MCP server to database: {local_mcp_path}")
-    
-    # Pre-connect to local MCP server
-    print(f"🔌 Pre-connecting to local MCP server...")
-    await mcp_manager.connect(local_mcp_path)
-    print(f"✅ Local MCP server ready")
+    # --- Safe Startup Wrapper ---
+    try:
+        from core.database import mcp_servers_collection
+        from utils.mcp_connection_manager import mcp_manager
+        import pathlib
+        
+        # Get local MCP server path
+        local_mcp_path = str(pathlib.Path(__file__).parent / "services" / "mcp_server.py")
+        
+        # Check if local MCP server exists in database
+        existing = await mcp_servers_collection.find_one({"url": local_mcp_path})
+        
+        if not existing:
+            # Add local MCP server to database
+            local_server = {
+                "name": "Local Demo Server",
+                "url": local_mcp_path,
+                "description": "Local MCP server with demo tools (roll_dice, get_weather)",
+                "is_local": True,
+                "created_at": datetime.now(),
+                "updated_at": datetime.now()
+            }
+            await mcp_servers_collection.insert_one(local_server)
+            print(f"✅ Added local MCP server to database: {local_mcp_path}")
+        
+        # Pre-connect to local MCP server
+        print(f"🔌 Pre-connecting to local MCP server...")
+        # In Vercel, subprocess execution might fail, so we catch it
+        try:
+            await mcp_manager.connect(local_mcp_path)
+            print(f"✅ Local MCP server ready")
+        except Exception as e:
+            print(f"⚠️ Failed to connect to local MCP server (expected in Vercel): {e}")
 
-    # --- Google Drive MCP Server ---
-    drive_mcp_path = str(pathlib.Path(__file__).parent / "services" / "google_drive_server.py")
-    
-    # Check if Drive MCP server exists
-    existing_drive = await mcp_servers_collection.find_one({"url": drive_mcp_path})
-    
-    if not existing_drive:
-        # Add Drive MCP server to database
-        drive_server = {
-            "name": "Google Drive MCP",
-            "url": drive_mcp_path,
-            "description": "Google Drive integration (List folders, Create folders)",
-            "is_local": True,
-            "created_at": datetime.now(),
-            "updated_at": datetime.now()
-        }
-        await mcp_servers_collection.insert_one(drive_server)
-        print(f"✅ Added Google Drive MCP server to database: {drive_mcp_path}")
-    
-    # Pre-connect to Drive MCP server
-    print(f"🔌 Pre-connecting to Google Drive MCP server...")
-    await mcp_manager.connect(drive_mcp_path)
-    print(f"✅ Google Drive MCP server ready")
+        # --- Google Drive MCP Server ---
+        drive_mcp_path = str(pathlib.Path(__file__).parent / "services" / "google_drive_server.py")
+        
+        # Check if Drive MCP server exists
+        existing_drive = await mcp_servers_collection.find_one({"url": drive_mcp_path})
+        
+        if not existing_drive:
+            # Add Drive MCP server to database
+            drive_server = {
+                "name": "Google Drive MCP",
+                "url": drive_mcp_path,
+                "description": "Google Drive integration (List folders, Create folders)",
+                "is_local": True,
+                "created_at": datetime.now(),
+                "updated_at": datetime.now()
+            }
+            await mcp_servers_collection.insert_one(drive_server)
+            print(f"✅ Added Google Drive MCP server to database: {drive_mcp_path}")
+        
+        # Pre-connect to Drive MCP server
+        print(f"🔌 Pre-connecting to Google Drive MCP server...")
+        try:
+            await mcp_manager.connect(drive_mcp_path)
+            print(f"✅ Google Drive MCP server ready")
+        except Exception as e:
+            print(f"⚠️ Failed to connect to Drive MCP server (expected in Vercel): {e}")
+            
+    except Exception as e:
+        print(f"❌ Critical Error in Startup Event: {e}")
+        # We generally don't want to raise here in Vercel, as it crashes the whole lambda
+        # Instead we log it and let the app start without MCPs
+        pass
 
 # Shutdown event to cleanup MCP connections
 @app.on_event("shutdown")
