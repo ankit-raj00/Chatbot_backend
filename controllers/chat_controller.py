@@ -416,25 +416,24 @@ class ChatController:
                         if fc.name in ["list_google_drive_folders", "create_google_drive_folder"]:
                             print(f"Injecting user_id for {fc.name}")
                             args["user_id"] = user_id
-                        
-                        try:
-                            # Special handling for Google Drive tools
-                            if fc.name in ["list_google_drive_folders", "create_google_drive_folder"]:
-                                print(f"[DEBUG] Executing Google Drive tool: {fc.name}")
-                                print(f"[DEBUG] User ID: {user_id}")
-                                print(f"[DEBUG] Args: {args}")
+                                                try:
+                                # Execute tool using native tools system
+                                from tools import execute_tool
                                 
-                                # Import execution functions from google_drive_server
-                                from google_drive_server import execute_list_google_drive_folders, execute_create_google_drive_folder
+                                # Inject user_id for Google Drive tools
+                                if fc.name in ["list_google_drive_folders", "create_google_drive_folder"]:
+                                    print(f"[DEBUG] Executing Google Drive tool: {fc.name}")
+                                    print(f"[DEBUG] User ID: {user_id}")
+                                    args["user_id"] = user_id
                                 
-                                if fc.name == "list_google_drive_folders":
-                                    # Default to 100 to show more folders
-                                    page_size = args.get('page_size', 100)
-                                    response_content = await execute_list_google_drive_folders(user_id, page_size)
-                                    
-                                elif fc.name == "create_google_drive_folder":
-                                    folder_name = args.get('folder_name', '')
-                                    response_content = await execute_create_google_drive_folder(user_id, folder_name)
+                                # Execute the tool
+                                result = await execute_tool(fc.name, **args)
+                                
+                                # Format response
+                                if isinstance(result, dict) and "result" in result:
+                                    response_content = result["result"]
+                                else:
+                                    response_content = result
                                 
                                 print(f"[DEBUG] Response: {response_content}")
                             else:
