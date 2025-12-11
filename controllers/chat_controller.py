@@ -2,7 +2,10 @@ from fastapi import HTTPException, status
 from core.database import messages_collection, conversations_collection
 from google import genai
 from google.genai import types
-from fastmcp import Client
+try:
+    from fastmcp import Client
+except ImportError:
+    Client = None
 from contextlib import AsyncExitStack
 from datetime import datetime
 from bson import ObjectId

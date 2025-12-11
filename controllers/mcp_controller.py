@@ -49,6 +49,9 @@ class MCPController:
 
                 # Get remote tools if URL provided
                 if mcp_server_url:
+                    if Client is None:
+                        raise ImportError("fastmcp module is not installed. Cannot connect to remote server.")
+                        
                     remote_client = Client(mcp_server_url)
                     await stack.enter_async_context(remote_client)
                     remote_tools = await remote_client.list_tools()

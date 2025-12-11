@@ -39,8 +39,35 @@ class CreateGoogleDriveFolder(BaseTool):
     
     async def execute(self, user_id: str, folder_name: str) -> Dict[str, Any]:
         """Execute the tool"""
-        # Import here to avoid circular dependency
-        from google_drive_server import execute_create_google_drive_folder
+        from controllers.google_oauth_controller import GoogleOAuthController
+        from googleapiclient.discovery import build
         
-        result = await execute_create_google_drive_folder(user_id, folder_name)
-        return {"result": result}
+        # Get user credentials
+        creds = await GoogleOAuthController.get_user_credentials(user_id)
+        if not creds:
+            return {"error": "User not authenticated for Google Drive. Please connect your account in the tools menu."}
+            
+        try:
+            # Build Drive service
+            service = build('drive', 'v3', credentials=creds)
+            
+            # Create folder
+            file_metadata = {
+                'name': folder_name,
+                'mimeType': 'application/vnd.google-apps.folder'
+            }
+            
+            file = service.files().create(
+                body=file_metadata,
+                fields='id, name, webViewLink'
+            ).execute()
+            
+            return {
+                "success": True,
+                "folder_id": file.get('id'),
+                "folder_name": file.get('name'),
+                "link": file.get('webViewLink')
+            }
+            
+        except Exception as e:
+            return {"error": f"Failed to create folder: {str(e)}"}

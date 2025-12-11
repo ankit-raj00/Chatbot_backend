@@ -39,8 +39,28 @@ class ListGoogleDriveFolders(BaseTool):
     
     async def execute(self, user_id: str, page_size: int = 100) -> Dict[str, Any]:
         """Execute the tool"""
-        # Import here to avoid circular dependency
-        from google_drive_server import execute_list_google_drive_folders
+        from controllers.google_oauth_controller import GoogleOAuthController
+        from googleapiclient.discovery import build
         
-        result = await execute_list_google_drive_folders(user_id, page_size)
-        return {"result": result}
+        # Get user credentials
+        creds = await GoogleOAuthController.get_user_credentials(user_id)
+        if not creds:
+            return {"error": "User not authenticated for Google Drive. Please connect your account in the tools menu."}
+            
+        try:
+            # Build Drive service
+            service = build('drive', 'v3', credentials=creds)
+            
+            # List folders
+            results = service.files().list(
+                pageSize=page_size,
+                q="mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+                fields="nextPageToken, files(id, name, createdTime, webViewLink)",
+                orderBy="createdTime desc"
+            ).execute()
+            
+            folders = results.get('files', [])
+            return {"folders": folders, "count": len(folders)}
+            
+        except Exception as e:
+            return {"error": f"Failed to list folders: {str(e)}"}

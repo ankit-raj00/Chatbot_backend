@@ -1,7 +1,8 @@
 try:
     from fastmcp import Client
 except ImportError:
-    Client = Any  # Fallback for type hints if library missing
+    print("Warning: fastmcp module not found. MCP features will be disabled.")
+    Client = None # Set to None instead of Any to allow checks
 
 from typing import Dict, Optional, List, Any
 import asyncio
@@ -50,6 +51,9 @@ class MCPConnectionManager:
                 return self._connections[url]
             
             try:
+                if Client is None:
+                    raise ImportError("fastmcp module is not installed. Cannot connect to MCP server.")
+                
                 print(f"Establishing new connection to MCP server: {url}")
                 client = Client(url)
                 await self._stack.enter_async_context(client)
