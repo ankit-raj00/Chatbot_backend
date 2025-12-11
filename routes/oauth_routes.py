@@ -32,9 +32,9 @@ async def google_oauth_callback(
     if not backend_url:
         vercel_url = os.getenv("VERCEL_URL")
         if vercel_url:
-            backend_url = f"https://{vercel_url}"
+            backend_url = f"https://chatbot-backend-beta-nine.vercel.app"
         else:
-            backend_url = "http://localhost:8000"
+            backend_url = "https://chatbot-backend-beta-nine.vercel.app"
             
     redirect_uri = f"{backend_url}/oauth/google/callback"
     
