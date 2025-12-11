@@ -417,32 +417,40 @@ class ChatController:
                             print(f"Injecting user_id for {fc.name}")
                             args["user_id"] = user_id
                         try:
-                            # Execute tool using native tools system
-                            from tools import execute_tool
+                            # 1. Native Tools (Google Drive, Utilities)
+                            # Native tools are executed via tools.execute_tool
+                            from tools import execute_tool, get_tool
                             
-                            # Inject user_id for Google Drive tools
-                            if fc.name in ["list_google_drive_folders", "create_google_drive_folder"]:
-                                print(f"[DEBUG] Executing Google Drive tool: {fc.name}")
-                                print(f"[DEBUG] User ID: {user_id}")
-                                args["user_id"] = user_id
+                            is_native_tool = get_tool(fc.name) is not None
                             
-                            # Execute the tool
-                            result = await execute_tool(fc.name, **args)
-                            
-                            # Format response
-                            if isinstance(result, dict) and "result" in result:
-                                response_content = result["result"]
+                            if is_native_tool:
+                                print(f"[DEBUG] Executing native tool: {fc.name}")
+                                
+                                # Inject user_id for Google Drive tools
+                                if fc.name in ["list_google_drive_folders", "create_google_drive_folder"]:
+                                    print(f"[DEBUG] Injecting user_id: {user_id}")
+                                    args["user_id"] = user_id
+                                
+                                # Execute
+                                result = await execute_tool(fc.name, **args)
+                                
+                                # Format response
+                                if isinstance(result, dict) and "result" in result:
+                                    response_content = result["result"]
+                                else:
+                                    response_content = result
+                                    
                             else:
-                                response_content = result
-                            
-                            print(f"[DEBUG] Response: {response_content}")
-                            else:
-                                # Execute tool using MCP manager for non-Google Drive tools
+                                # 2. MCP Tools
+                                # Executed via mcp_manager
+                                print(f"[DEBUG] Executing MCP tool: {fc.name}")
                                 result = await mcp_manager.call_tool_by_name(fc.name, args)
                                 response_content = result if isinstance(result, str) else str(result)
                                 if isinstance(result, list) and len(result) > 0 and hasattr(result[0], 'text'):
                                     response_content = result[0].text
-                                
+                            
+                            print(f"[DEBUG] Tool output: {response_content}")
+                            
                             response_parts.append(types.Part.from_function_response(
                                 name=fc.name,
                                 response={"result": response_content}
