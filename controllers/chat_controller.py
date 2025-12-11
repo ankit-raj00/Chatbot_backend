@@ -7,6 +7,7 @@ from contextlib import AsyncExitStack
 from datetime import datetime
 from bson import ObjectId
 from utils.mcp_connection_manager import mcp_manager
+from tools import get_tool, execute_tool
 import os
 
 class ChatController:
@@ -173,7 +174,7 @@ class ChatController:
                 detail=str(e)
             )
     
-    async def process_chat_stream(self, user_id: str, message: str, conversation_id: str = None, mcp_server_urls: list[str] = None, model: str = "gemini-2.5-flash"):
+    async def process_chat_stream(self, user_id: str, message: str, conversation_id: str = None, mcp_server_urls: list[str] = None, model: str = "gemini-2.5-flash", enabled_tools: list[str] = None):
         """Process chat message with streaming response"""
         import json
         from config.model_config import ModelConfig
@@ -309,10 +310,25 @@ class ChatController:
             async with AsyncExitStack() as stack:
                 tools = []
                 
+                # Add enabled native tools
+                if enabled_tools and len(enabled_tools) > 0:
+                    native_tool_declarations = []
+                    for tool_id in enabled_tools:
+                        tool = get_tool(tool_id)
+                        if tool:
+                            native_tool_declarations.append(tool.to_gemini_function_declaration())
+                    
+                    if native_tool_declarations:
+                        tools.append(types.Tool(function_declarations=native_tool_declarations))
+                        print(f"[DEBUG] Added {len(native_tool_declarations)} native tools")
+                
                 # Only connect to MCP if user has selected servers
                 if mcp_server_urls and len(mcp_server_urls) > 0:
                     # Use connection manager to get/create persistent connections
-                    tools = await mcp_manager.get_tools_for_urls(mcp_server_urls)
+                    mcp_tools = await mcp_manager.get_tools_for_urls(mcp_server_urls)
+                    if mcp_tools:
+                        tools.extend(mcp_tools)
+                        print(f"[DEBUG] Added {len(mcp_tools)} MCP tools")
                     
                     # Get cached resource context
                     resource_context = mcp_manager.get_resource_context_for_urls(mcp_server_urls)
@@ -327,8 +343,10 @@ class ChatController:
                     )
                     
                     # Add resource context if available
-                    if resource_context:
-                        system_instruction += "\n\n" + resource_context
+                    if mcp_server_urls and len(mcp_server_urls) > 0:
+                        resource_context = mcp_manager.get_resource_context_for_urls(mcp_server_urls)
+                        if resource_context:
+                            system_instruction += "\n\n" + resource_context
                     
                     contents.insert(0, types.Content(
                         role="user",
@@ -346,7 +364,7 @@ class ChatController:
                 config_params = {}
                 if tools:
                     config_params["tools"] = tools
-                    print(f"[DEBUG] Sending {len(tools)} tools to Gemini")
+                    print(f"[DEBUG] Sending {len(tools)} tool(s) to Gemini")
                     for tool in tools:
                         print(f"[DEBUG] Tool: {tool.function_declarations[0].name if hasattr(tool, 'function_declarations') else 'unknown'}")
                     # Disable automatic function calling to handle injection manually
@@ -460,7 +478,8 @@ class ChatController:
         conversation_id: str = None, 
         mcp_server_urls: list[str] = None,
         model: str = "gemini-2.5-flash",
-        images: list = None
+        images: list = None,
+        enabled_tools: list[str] = None
     ):
         """Process multimodal chat message with streaming response"""
         import json

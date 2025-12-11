@@ -14,6 +14,7 @@ class ChatRequest(BaseModel):
     conversation_id: str | None = None
     mcp_server_urls: List[str] = []
     model: str = "gemini-2.5-flash"
+    enabled_tools: List[str] = []
 
 @router.post("")
 async def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
@@ -35,7 +36,8 @@ async def chat_stream(request: ChatRequest, current_user: dict = Depends(get_cur
             message=request.message,
             conversation_id=request.conversation_id,
             mcp_server_urls=request.mcp_server_urls,
-            model=request.model
+            model=request.model,
+            enabled_tools=request.enabled_tools
         ),
         media_type="text/event-stream"
     )
@@ -46,6 +48,7 @@ async def chat_stream_multimodal(
     conversation_id: Optional[str] = Form(None),
     mcp_server_urls: Optional[str] = Form(None),
     model: str = Form("gemini-2.5-flash"),
+    enabled_tools: Optional[str] = Form(None),
     images: List[UploadFile] = File(None),
     current_user: dict = Depends(get_current_user)
 ):
@@ -61,6 +64,14 @@ async def chat_stream_multimodal(
         except:
             parsed_urls = []
     
+    # Parse enabled_tools from JSON string
+    parsed_tools = []
+    if enabled_tools:
+        try:
+            parsed_tools = json.loads(enabled_tools)
+        except:
+            parsed_tools = []
+    
     return StreamingResponse(
         chat_controller.process_chat_stream_multimodal(
             user_id=str(current_user["_id"]),
@@ -68,7 +79,8 @@ async def chat_stream_multimodal(
             conversation_id=conversation_id,
             mcp_server_urls=parsed_urls,
             model=model,
-            images=images
+            images=images,
+            enabled_tools=parsed_tools
         ),
         media_type="text/event-stream"
     )

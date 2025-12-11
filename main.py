@@ -22,6 +22,7 @@ from routes.chat_routes import router as chat_router
 from routes.mcp_routes import router as mcp_router
 from routes.mcp_server_routes import router as mcp_server_router
 from routes.oauth_routes import router as oauth_router
+from routes.tool_routes import router as tool_router
 
 # Create FastAPI app
 app = FastAPI(
@@ -128,6 +129,7 @@ app.include_router(chat_router)
 app.include_router(mcp_router)
 app.include_router(mcp_server_router)
 app.include_router(oauth_router)
+app.include_router(tool_router)
 
 @app.get("/")
 async def root():
