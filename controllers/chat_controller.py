@@ -416,26 +416,26 @@ class ChatController:
                         if fc.name in ["list_google_drive_folders", "create_google_drive_folder"]:
                             print(f"Injecting user_id for {fc.name}")
                             args["user_id"] = user_id
-                                                try:
-                                # Execute tool using native tools system
-                                from tools import execute_tool
-                                
-                                # Inject user_id for Google Drive tools
-                                if fc.name in ["list_google_drive_folders", "create_google_drive_folder"]:
-                                    print(f"[DEBUG] Executing Google Drive tool: {fc.name}")
-                                    print(f"[DEBUG] User ID: {user_id}")
-                                    args["user_id"] = user_id
-                                
-                                # Execute the tool
-                                result = await execute_tool(fc.name, **args)
-                                
-                                # Format response
-                                if isinstance(result, dict) and "result" in result:
-                                    response_content = result["result"]
-                                else:
-                                    response_content = result
-                                
-                                print(f"[DEBUG] Response: {response_content}")
+                        try:
+                            # Execute tool using native tools system
+                            from tools import execute_tool
+                            
+                            # Inject user_id for Google Drive tools
+                            if fc.name in ["list_google_drive_folders", "create_google_drive_folder"]:
+                                print(f"[DEBUG] Executing Google Drive tool: {fc.name}")
+                                print(f"[DEBUG] User ID: {user_id}")
+                                args["user_id"] = user_id
+                            
+                            # Execute the tool
+                            result = await execute_tool(fc.name, **args)
+                            
+                            # Format response
+                            if isinstance(result, dict) and "result" in result:
+                                response_content = result["result"]
+                            else:
+                                response_content = result
+                            
+                            print(f"[DEBUG] Response: {response_content}")
                             else:
                                 # Execute tool using MCP manager for non-Google Drive tools
                                 result = await mcp_manager.call_tool_by_name(fc.name, args)
