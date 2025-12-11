@@ -23,6 +23,7 @@ from routes.mcp_routes import router as mcp_router
 from routes.mcp_server_routes import router as mcp_server_router
 from routes.oauth_routes import router as oauth_router
 from routes.tool_routes import router as tool_router
+from routes.auth_status_routes import router as auth_status_router
 
 # Create FastAPI app
 app = FastAPI(
@@ -130,6 +131,7 @@ app.include_router(mcp_router)
 app.include_router(mcp_server_router)
 app.include_router(oauth_router)
 app.include_router(tool_router)
+app.include_router(auth_status_router)
 
 @app.get("/")
 async def root():
