@@ -419,7 +419,7 @@ class ChatController:
                         try:
                             # 1. Native Tools (Google Drive, Utilities)
                             # Native tools are executed via tools.execute_tool
-                            from tools import execute_tool, get_tool
+                            # from tools import execute_tool, get_tool (REMOVED: Already imported globally)
                             
                             is_native_tool = get_tool(fc.name) is not None
                             
