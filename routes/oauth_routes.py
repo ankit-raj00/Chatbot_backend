@@ -28,7 +28,14 @@ async def google_oauth_callback(
     
     # Get backend URL for callback (prod) or default to localhost (dev)
     # Vercel provides VERCEL_URL, but it doesn't include https://
-    backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
+    backend_url = os.getenv("BACKEND_URL")
+    if not backend_url:
+        vercel_url = os.getenv("VERCEL_URL")
+        if vercel_url:
+            backend_url = f"https://{vercel_url}"
+        else:
+            backend_url = "http://localhost:8000"
+            
     redirect_uri = f"{backend_url}/oauth/google/callback"
     
     result = await GoogleOAuthController.handle_callback(code=code, state=state, redirect_uri=redirect_uri)
