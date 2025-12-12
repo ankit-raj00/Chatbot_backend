@@ -185,14 +185,22 @@ class MCPServerController:
                 await mcp_manager.connect(server_url)
                 
                 # Get tools from the connection
-                tools = mcp_manager.get_tools_for_server(server_url)
+                gemini_tools = await mcp_manager.get_tools_for_urls([server_url])
                 
-                if tools:
+                tool_list = []
+                if gemini_tools:
+                    for tool_group in gemini_tools:
+                        if hasattr(tool_group, 'function_declarations') and tool_group.function_declarations:
+                            for func in tool_group.function_declarations:
+                                tool_list.append({
+                                    "name": func.name,
+                                    "description": func.description or ""
+                                })
+                
+                if tool_list:
                     return {
                         "status": "connected",
-                        "tools": [{"name": tool.function_declarations[0].name if hasattr(tool, 'function_declarations') and tool.function_declarations else "unknown", 
-                                   "description": tool.function_declarations[0].description if hasattr(tool, 'function_declarations') and tool.function_declarations else ""} 
-                                  for tool in tools]
+                        "tools": tool_list
                     }
                 else:
                     return {
