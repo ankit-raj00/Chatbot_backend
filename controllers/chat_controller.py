@@ -410,6 +410,8 @@ class ChatController:
                     for fc in function_calls:
                         print(f"Executing tool: {fc.name}")
                         yield f"data: {json.dumps({'status': f'Using tool: {fc.name}'})}\n\n"
+                        # Stream tool call details
+                        yield f"data: {json.dumps({'tool_call': {'name': fc.name, 'args': dict(fc.args)}})}\n\n"
                         
                         args = fc.args
                         # Inject user_id for Google Drive tools
@@ -450,6 +452,8 @@ class ChatController:
                                     response_content = result[0].text
                             
                             print(f"[DEBUG] Tool output: {response_content}")
+                            # Stream tool output
+                            yield f"data: {json.dumps({'tool_output': {'name': fc.name, 'result': response_content}})}\n\n"
                             
                             response_parts.append(types.Part.from_function_response(
                                 name=fc.name,
@@ -733,6 +737,8 @@ class ChatController:
                     for fc in function_calls:
                         print(f"Executing tool: {fc.name}")
                         yield f"data: {json.dumps({'status': f'Using tool: {fc.name}'})}\n\n"
+                        # Stream tool call details
+                        yield f"data: {json.dumps({'tool_call': {'name': fc.name, 'args': dict(fc.args)}})}\n\n"
                         
                         args = fc.args
                         # Inject user_id for Google Drive tools
@@ -749,6 +755,9 @@ class ChatController:
                             if isinstance(result, list) and len(result) > 0 and hasattr(result[0], 'text'):
                                 response_content = result[0].text
                                 
+                            # Stream tool output
+                            yield f"data: {json.dumps({'tool_output': {'name': fc.name, 'result': response_content}})}\n\n"
+
                             response_parts.append(types.Part.from_function_response(
                                 name=fc.name,
                                 response={"result": response_content}
