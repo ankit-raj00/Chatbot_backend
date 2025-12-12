@@ -187,6 +187,7 @@ class ChatController:
             model = ModelConfig.DEFAULT_MODEL
 
         try:
+            tool_steps = []
             # Get or create conversation
             if not conversation_id:
                 new_conv = {
@@ -413,6 +414,13 @@ class ChatController:
                         # Stream tool call details
                         yield f"data: {json.dumps({'tool_call': {'name': fc.name, 'args': dict(fc.args)}})}\n\n"
                         
+                        current_tool_step = {
+                            'name': fc.name,
+                            'args': dict(fc.args),
+                            'status': 'running'
+                        }
+                        tool_steps.append(current_tool_step)
+                        
                         args = fc.args
                         # Inject user_id for Google Drive tools
                         if fc.name in ["list_google_drive_folders", "create_google_drive_folder"]:
@@ -455,6 +463,10 @@ class ChatController:
                             # Stream tool output
                             yield f"data: {json.dumps({'tool_output': {'name': fc.name, 'result': response_content}})}\n\n"
                             
+                            # Update tool step
+                            current_tool_step['result'] = response_content
+                            current_tool_step['status'] = 'completed'
+                            
                             response_parts.append(types.Part.from_function_response(
                                 name=fc.name,
                                 response={"result": response_content}
@@ -477,6 +489,7 @@ class ChatController:
                 "user_id": user_id,
                 "role": "assistant",
                 "content": full_response,
+                "tool_steps": tool_steps,
                 "timestamp": datetime.now()
             })
                 
@@ -508,6 +521,7 @@ class ChatController:
         print(f"Images count: {len(images) if images else 0}")
         print(f"{'='*50}\n")
         try:
+            tool_steps = []
             # Validate model
             if not ModelConfig.is_valid_model(model):
                 model = ModelConfig.DEFAULT_MODEL
@@ -740,6 +754,13 @@ class ChatController:
                         # Stream tool call details
                         yield f"data: {json.dumps({'tool_call': {'name': fc.name, 'args': dict(fc.args)}})}\n\n"
                         
+                        current_tool_step = {
+                            'name': fc.name,
+                            'args': dict(fc.args),
+                            'status': 'running'
+                        }
+                        tool_steps.append(current_tool_step)
+                        
                         args = fc.args
                         # Inject user_id for Google Drive tools
                         if fc.name in ["list_google_drive_folders", "create_google_drive_folder"]:
@@ -757,6 +778,10 @@ class ChatController:
                                 
                             # Stream tool output
                             yield f"data: {json.dumps({'tool_output': {'name': fc.name, 'result': response_content}})}\n\n"
+                            
+                            # Update tool step
+                            current_tool_step['result'] = response_content
+                            current_tool_step['status'] = 'completed'
 
                             response_parts.append(types.Part.from_function_response(
                                 name=fc.name,
@@ -779,6 +804,7 @@ class ChatController:
                 "user_id": user_id,
                 "role": "assistant",
                 "content": full_response,
+                "tool_steps": tool_steps,
                 "timestamp": datetime.now()
             })
                 

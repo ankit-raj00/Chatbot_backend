@@ -76,6 +76,8 @@ class ConversationController:
             for msg in messages_list:
                 msg["_id"] = str(msg["_id"])
                 msg["timestamp"] = msg["timestamp"].isoformat()
+                if "tool_steps" in msg:
+                    msg["toolSteps"] = msg["tool_steps"]
             
             return messages_list
         except HTTPException:
