@@ -101,12 +101,34 @@ class ConversationController:
                     detail="Conversation not found"
                 )
             
+            # Find all messages with attachments
+            messages_cursor = messages_collection.find({
+                "conversation_id": conversation_id,
+                "user_id": user_id,
+                "attachments": {"$exists": True, "$ne": []}
+            })
+            
+            # Delete associated files from Cloudinary
+            from utils.cloudinary_handler import CloudinaryHandler
+            cloudinary_handler = CloudinaryHandler()
+            
+            async for msg in messages_cursor:
+                if "attachments" in msg:
+                    for attachment in msg["attachments"]:
+                        if "cloudinary_public_id" in attachment:
+                            try:
+                                print(f"Deleting Cloudinary file: {attachment['cloudinary_public_id']}")
+                                cloudinary_handler.delete_file(attachment['cloudinary_public_id'])
+                            except Exception as e:
+                                print(f"Error deleting Cloudinary file {attachment['cloudinary_public_id']}: {e}")
+            
+            # Delete conversation and messages
             await conversations_collection.delete_one({"_id": ObjectId(conversation_id)})
             await messages_collection.delete_many({
                 "conversation_id": conversation_id,
                 "user_id": user_id
             })
-            return {"message": "Conversation deleted"}
+            return {"message": "Conversation and associated media deleted"}
         except HTTPException:
             raise
         except Exception as e:
