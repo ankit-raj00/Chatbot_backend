@@ -71,15 +71,22 @@ async def model_node(state: ChatState, config: RunnableConfig):
     
     return {"messages": [response]}
 
+from langchain_core.messages import ToolMessage
+from langgraph.prebuilt import ToolInvocation
+from langchain_core.tools import StructuredTool
+
 async def tool_node_wrapper(state: ChatState):
     """
-    Wrapper for ToolNode to fetch tools dynamically.
-    Ensures BOTH MCP and Native tools are available for execution.
+    Custom ToolNode that executes tools SEQUENTIALLY.
+    This is required because the frontend assumes 'Start -> End' order (LIFO) for tool steps.
+    Parallel execution (default ToolNode) causes race conditions in the UI.
     """
-    # 1. MCP Tools
+    messages = state["messages"]
+    last_message = messages[-1]
+    
+    # 1. Prepare Tools Map
     mcp_tools = await get_all_active_mcp_tools()
     
-    # 2. Native Tools
     from tools import AVAILABLE_TOOLS
     from utils.langchain_tools import wrap_native_tool
     
@@ -88,10 +95,47 @@ async def tool_node_wrapper(state: ChatState):
         native_tools.append(wrap_native_tool(tool_instance))
         
     all_tools = mcp_tools + native_tools
+    tool_map = {t.name: t for t in all_tools}
     
-    print(f"ToolNode executing with {len(all_tools)} available tools")
-    tool_node = ToolNode(all_tools)
-    return await tool_node.ainvoke(state)
+    results = []
+    
+    # 2. Iterate and Execute Sequentially
+    if hasattr(last_message, "tool_calls"):
+        for tool_call in last_message.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+            tool_call_id = tool_call["id"]
+            
+            selected_tool = tool_map.get(tool_name)
+            
+            output = None
+            if selected_tool:
+                try:
+                    # Execute
+                    # Support both async and sync tools (though ours are mostly async)
+                    if hasattr(selected_tool, "acoroutine") and selected_tool.acoroutine:
+                         output = await selected_tool.acoroutine(**tool_args)
+                    elif hasattr(selected_tool, "_run"):
+                         output = await asyncio.to_thread(selected_tool._run, **tool_args)
+                    else:
+                         # Fallback for simple functions wrapped
+                         output = await selected_tool.ainvoke(tool_args)
+                except Exception as e:
+                    output = f"Error executing {tool_name}: {str(e)}"
+            else:
+                output = f"Tool {tool_name} not found."
+            
+            # Create ToolMessage
+            # Ensure output is string for ToolMessage content
+            content_str = str(output)
+            
+            results.append(ToolMessage(
+                content=content_str,
+                tool_call_id=tool_call_id,
+                name=tool_name
+            ))
+            
+    return {"messages": results}
 
 
 # 3. Graph Construction
