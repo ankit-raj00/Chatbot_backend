@@ -206,7 +206,10 @@ class ChatController:
             full_response_text = ""
             tool_steps = []
             
-            async for event in chat_agent.astream_events(graph_input, version="v1"):
+            # Pass enabled_tools via config
+            config = {"configurable": {"enabled_tools": enabled_tools or []}}
+            
+            async for event in chat_agent.astream_events(graph_input, version="v1", config=config):
                 event_type = event["event"]
                 
                 # Stream Tokens
@@ -234,8 +237,7 @@ class ChatController:
                     tool_name = event["name"]
                     tool_args = event["data"].get("input")
                     yield f"data: {json.dumps({'status': f'Using tool: {tool_name}'})}\n\n"
-                    # yield f"data: {json.dumps({'tool_call': {'name': tool_name, 'args': tool_args}})}\n\n" 
-                    # Frontend might expect tool_call event
+                    yield f"data: {json.dumps({'tool_call': {'name': tool_name, 'args': tool_args}})}\n\n"
                     
                     tool_steps.append({
                         "name": tool_name,
@@ -246,11 +248,15 @@ class ChatController:
                 elif event_type == "on_tool_end":
                     tool_name = event["name"]
                     output = event["data"].get("output")
-                    # yield f"data: {json.dumps({'tool_output': {'name': tool_name, 'result': str(output)}})}\n\n"
+                    yield f"data: {json.dumps({'tool_output': {'name': tool_name, 'result': str(output)}})}\n\n"
                     
                     # Update tool steps? Simple append for now
-                    # tool_steps[-1]["result"] = str(output) # Assuming sequential
-                    # tool_steps[-1]["status"] = "completed"
+                    if tool_steps and tool_steps[-1]["name"] == tool_name:
+                         tool_steps[-1]["result"] = str(output)
+                         tool_steps[-1]["status"] = "completed"
+                    else:
+                         # Fallback if ordering is weird (async)
+                         pass
 
             # 9. Save Assistant Response (Unchanged Persistence)
             await messages_collection.insert_one({

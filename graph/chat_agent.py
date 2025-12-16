@@ -15,40 +15,55 @@ class ChatState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
 
 # 2. Nodes
-async def model_node(state: ChatState):
+async def model_node(state: ChatState, config: dict):
     """
     The main model node that calls Gemini.
-    We fetch available tools dynamically here to ensure we always have the latest MCP tools.
     """
     # Initialize Model (Gemini 1.5 Flash as requested)
-    # Note: Google API Key should be in env
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash", 
         google_api_key=os.getenv("GEMINI_API_KEY"),
         temperature=0.7
     )
     
+    # Get enabled tools from config
+    enabled_tools = config.get("configurable", {}).get("enabled_tools", [])
+    
     # Fetch MCP Tools dynamically
     mcp_tools = await get_all_active_mcp_tools()
     
     # Fetch Native Tools
     from tools import AVAILABLE_TOOLS
-    # Wrap native tools for LangChain
+    from utils.langchain_tools import wrap_native_tool
+    
     native_tools = []
     for tool_name, tool_instance in AVAILABLE_TOOLS.items():
-        # Using a generic wrapper for our custom BaseTool to LangChain BaseTool
-        # Check if already has .to_langchain_tool() or wrap manually
-        # Ideally our native tools should be compatible or easy to wrap.
-        # Let's import the wrapper logic or create a helper.
-        # For fast fix, we define a wrapper helper here or in langchain_tools.
-        from utils.langchain_tools import wrap_native_tool
         native_tools.append(wrap_native_tool(tool_instance))
     
     all_tools = mcp_tools + native_tools
     
+    # Filter tools
+    if enabled_tools:
+        # Note: We need to match by name. 
+        # Native tools use their ID (e.g., 'roll_dice').
+        # MCP tools use their displayed name? Or sanitized name?
+        # Usually list contains tool names.
+        final_tools = [t for t in all_tools if t.name in enabled_tools]
+    else:
+        # If no tools enabled, bind none? Or all? 
+        # Requirement implies strict filtering. If list provided but empty -> No Tools.
+        # If list is None -> maybe All? 
+        # Controller passes [] if None. So [] means no tools.
+        final_tools = []
+        
+        # Wait, if user didn't select ANY, usually means "Chat Only". 
+        # But if enabled_tools is None (legacy), maybe allow all? 
+        # Controller currently does: `enabled_tools or []`. So default is NO TOOLS.
+        pass
+
     # Bind tools to the model
-    if all_tools:
-        llm = llm.bind_tools(all_tools)
+    if final_tools:
+        llm = llm.bind_tools(final_tools)
         
     # Invoke
     response = await llm.ainvoke(state["messages"])
