@@ -64,30 +64,79 @@ async def get_langchain_mcp_tools(server_name: str) -> List[BaseTool]:
         print(f"Error loading MCP tools for {server_name}: {e}")
         return []
 
+def json_schema_to_pydantic(name: str, schema: dict) -> Any:
+    """
+    Dynamically create a Pydantic model from a JSON Schema.
+    Handles basic types: string, integer, number, boolean.
+    """
+    from pydantic import create_model, Field
+    
+    properties = schema.get("properties", {})
+    required = schema.get("required", [])
+    
+    fields = {}
+    
+    for field_name, field_info in properties.items():
+        field_type_str = field_info.get("type", "string")
+        description = field_info.get("description", "")
+        default_val = field_info.get("default")
+        
+        # Map types
+        if field_type_str == "integer":
+            py_type = int
+        elif field_type_str == "number":
+            py_type = float
+        elif field_type_str == "boolean":
+            py_type = bool
+        else:
+            py_type = str
+            
+        # Create Field
+        # If required and no default -> ...
+        # If default exists -> Field(default, ...)
+        # If not required and no default -> Field(None, ...) and Optional[py_type]
+        
+        if default_val is not None:
+            fields[field_name] = (py_type, Field(default=default_val, description=description))
+        elif field_name in required:
+            fields[field_name] = (py_type, Field(..., description=description))
+        else:
+            fields[field_name] = (Optional[py_type], Field(None, description=description))
+            
+    return create_model(f"{name}Args", **fields)
+
 def wrap_native_tool(native_tool: Any) -> BaseTool:
     """
     Wraps our internal BaseTool (Native) into a LangChain BaseTool.
     """
-    # Our native tools have: name, description, execute(args), parameters (JSON Schema)
-    
-    async def _async_native_wrapper(**kwargs):
-        # Inject dependencies if needed (handled in execute_tool usually)
-        # But here we call the tool instance directly
-        # Note: Our native tools might expect 'user_id' etc. 
-        # We need to rely on the agent passing them or kwargs having them.
-        return await native_tool.execute(**kwargs)
+    try:
+        # Create Pydantic args_schema from native tool parameters
+        if hasattr(native_tool, "parameters"):
+            args_schema = json_schema_to_pydantic(native_tool.name, native_tool.parameters)
+        else:
+            args_schema = None
+            
+        async def _async_native_wrapper(**kwargs):
+            return await native_tool.execute(**kwargs)
 
-    # We need to convert native tool 'parameters' (JSON Schema) to Pydantic
-    # This is tricky. For now, let's look at the tool implementation.
-    # Most have simpler args.
-    
-    return StructuredTool.from_function(
-        func=None,
-        coroutine=_async_native_wrapper,
-        name=native_tool.name,
-        description=native_tool.description,
-        # args_schema=... (Ideally we convert JSON schema to Pydantic)
-    )
+        return StructuredTool.from_function(
+            func=None,
+            coroutine=_async_native_wrapper,
+            name=native_tool.name,
+            description=native_tool.description,
+            args_schema=args_schema
+        )
+    except Exception as e:
+        print(f"Error wrapping tool {native_tool.name}: {e}")
+        # Fallback to no-args or unvalidated
+        async def _fallback(**kwargs):
+            return await native_tool.execute(**kwargs)
+        return StructuredTool.from_function(
+            func=None,
+            coroutine=_fallback,
+            name=native_tool.name,
+            description=native_tool.description
+        )
 
 async def get_all_active_mcp_tools() -> List[BaseTool]:
     """Helper to get tools from ALL active connections"""
