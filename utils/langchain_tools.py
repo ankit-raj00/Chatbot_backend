@@ -34,22 +34,29 @@ async def get_langchain_mcp_tools(server_name: str) -> List[BaseTool]:
         langchain_tools = []
         
         for t in mcp_tools:
-            async def _create_tool_func(tool_name=t.name, **kwargs):
-                return await session.call_tool(tool_name, arguments=kwargs)
+            # Factory to capture tool name safely without exposing it in signature
+            def make_tool_func(name):
+                async def _mcp_tool_wrapper(**kwargs):
+                    return await session.call_tool(name, arguments=kwargs)
+                return _mcp_tool_wrapper
+            
+            tool_func = make_tool_func(t.name)
             
             # Create Pydantic model for args
-            input_schema = t.inputSchema # OpenRPC schema dict
-            # Simplifying: FastMCP usually gives clean JSON schema
-            # We can use StructuredTool.from_function but we need type hints or schema
-            
+            args_schema = None
+            if hasattr(t, 'inputSchema') and t.inputSchema:
+                 try:
+                     args_schema = json_schema_to_pydantic(t.name, t.inputSchema)
+                 except Exception as e:
+                     print(f"Failed to convert schema for {t.name}: {e}")
+
             # Simple wrapper:
             langchain_tools.append(StructuredTool.from_function(
                 func=None,
-                coroutine=_create_tool_func,
+                coroutine=tool_func,
                 name=t.name,
                 description=t.description or "",
-                # We can try passing args_schema if we parse inputSchema
-                # For now, let LangChain infer or use generic implementation
+                args_schema=args_schema
             ))
             
         # Refined Fallback: Use a generic tool that takes any args
