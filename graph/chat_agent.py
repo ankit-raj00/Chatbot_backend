@@ -118,9 +118,10 @@ async def tool_node_wrapper(state: ChatState, config: RunnableConfig):
             
             if selected_tool:
                 try:
-                    # Inject user_id if Native Tool
+                    # Inject user_id if Native Tool AND tool requires it
                     if tool_name in native_instances and user_id:
-                        tool_args["user_id"] = user_id
+                        if native_instances[tool_name].requires_auth:
+                            tool_args["user_id"] = user_id
                         
                     # Execute using standard LangChain invocation
                     # This handles async/sync dispatch, callbacks, and config automatically.
