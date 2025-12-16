@@ -213,8 +213,21 @@ class ChatController:
                 if event_type == "on_chat_model_stream":
                     chunk = event["data"]["chunk"]
                     if chunk.content:
-                        full_response_text += chunk.content
-                        yield f"data: {json.dumps({'chunk': chunk.content})}\n\n"
+                        content_str = ""
+                        if isinstance(chunk.content, list):
+                            # Ensure we only append text parts if it's a list
+                            # or just stringify if appropriate, but usually list implies multimodal response parts.
+                            # For simple chat stream, we probably just want the text.
+                            for part in chunk.content:
+                                if isinstance(part, str):
+                                    content_str += part
+                                elif isinstance(part, dict) and "text" in part:
+                                    content_str += part["text"]
+                        else:
+                            content_str = str(chunk.content)
+                            
+                        full_response_text += content_str
+                        yield f"data: {json.dumps({'chunk': content_str})}\n\n"
                 
                 # Tool Events
                 elif event_type == "on_tool_start":
