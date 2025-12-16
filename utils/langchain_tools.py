@@ -110,6 +110,10 @@ def json_schema_to_pydantic(name: str, schema: dict) -> Any:
         else:
             fields[field_name] = (Optional[py_type], Field(None, description=description))
             
+    # Always allow user_id as an optional field for internal injection
+    if "user_id" not in fields:
+        fields["user_id"] = (Optional[str], Field(None, description="Injected user ID"))
+
     return create_model(f"{name}Args", **fields)
 
 def wrap_native_tool(native_tool: Any) -> BaseTool:
