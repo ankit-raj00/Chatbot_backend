@@ -14,8 +14,10 @@ class ChatState(TypedDict):
     # 'messages' holds the full interaction including tool calls
     messages: Annotated[List[BaseMessage], add_messages]
 
+from langchain_core.runnables import RunnableConfig
+
 # 2. Nodes
-async def model_node(state: ChatState, config: dict):
+async def model_node(state: ChatState, config: RunnableConfig):
     """
     The main model node that calls Gemini.
     """
