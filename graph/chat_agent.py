@@ -116,15 +116,23 @@ async def tool_node_wrapper(state: ChatState, config: RunnableConfig):
             
             selected_tool = tool_map.get(tool_name)
             
-            if selected_tool:
                 try:
-                    # Inject user_id if Native Tool
-                    if tool_name in native_instances and user_id:
-                        tool_args["user_id"] = user_id
+                    # Execute
+                    if tool_name in native_instances:
+                        # NATIVE TOOL EXECUTION
+                        # execute directly to allow hidden user_id injection without schema validation issues
+                        native_tool = native_instances[tool_name]
                         
-                    # Execute using standard LangChain invocation
-                    # This handles async/sync dispatch, callbacks, and config automatically.
-                    output = await selected_tool.ainvoke(tool_args, config=config)
+                        # Prepare args
+                        exec_args = tool_args.copy()
+                        if user_id:
+                             exec_args["user_id"] = user_id
+                             
+                        output = await native_tool.execute(**exec_args)
+                    else:
+                        # MCP / STANDARD TOOL EXECUTION
+                        # Use standard LangChain invocation
+                        output = await selected_tool.ainvoke(tool_args, config=config)
 
                 except Exception as e:
                     output = f"Error executing {tool_name}: {str(e)}"
