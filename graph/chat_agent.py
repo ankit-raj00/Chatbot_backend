@@ -28,12 +28,27 @@ async def model_node(state: ChatState):
         temperature=0.7
     )
     
-    # Fetch Tools dynamically
-    tools = await get_all_active_mcp_tools()
+    # Fetch MCP Tools dynamically
+    mcp_tools = await get_all_active_mcp_tools()
+    
+    # Fetch Native Tools
+    from tools import tool_registry
+    # Wrap native tools for LangChain
+    native_tools = []
+    for tool_name, tool_instance in tool_registry._tools.items():
+        # Using a generic wrapper for our custom BaseTool to LangChain BaseTool
+        # Check if already has .to_langchain_tool() or wrap manually
+        # Ideally our native tools should be compatible or easy to wrap.
+        # Let's import the wrapper logic or create a helper.
+        # For fast fix, we define a wrapper helper here or in langchain_tools.
+        from utils.langchain_tools import wrap_native_tool
+        native_tools.append(wrap_native_tool(tool_instance))
+    
+    all_tools = mcp_tools + native_tools
     
     # Bind tools to the model
-    if tools:
-        llm = llm.bind_tools(tools)
+    if all_tools:
+        llm = llm.bind_tools(all_tools)
         
     # Invoke
     response = await llm.ainvoke(state["messages"])
