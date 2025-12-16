@@ -116,6 +116,7 @@ async def tool_node_wrapper(state: ChatState, config: RunnableConfig):
             
             selected_tool = tool_map.get(tool_name)
             
+            if selected_tool:
                 try:
                     # Execute
                     if tool_name in native_instances:
