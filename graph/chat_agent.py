@@ -45,23 +45,22 @@ async def model_node(state: ChatState, config: RunnableConfig):
     all_tools = mcp_tools + native_tools
     
     # Filter tools
-    if enabled_tools:
-        # Note: We need to match by name. 
-        # Native tools use their ID (e.g., 'roll_dice').
-        # MCP tools use their displayed name? Or sanitized name?
-        # Usually list contains tool names.
-        final_tools = [t for t in all_tools if t.name in enabled_tools]
-    else:
-        # If no tools enabled, bind none? Or all? 
-        # Requirement implies strict filtering. If list provided but empty -> No Tools.
-        # If list is None -> maybe All? 
-        # Controller passes [] if None. So [] means no tools.
-        final_tools = []
-        
-        # Wait, if user didn't select ANY, usually means "Chat Only". 
-        # But if enabled_tools is None (legacy), maybe allow all? 
-        # Controller currently does: `enabled_tools or []`. So default is NO TOOLS.
-        pass
+    # Logic: 
+    # 1. Native Tools: Must be in 'enabled_tools' list.
+    # 2. MCP Tools: Always allowed if connected (authentication handled by server connection).
+    #    We identify native tools by checking if their name is in AVAILABLE_TOOLS.
+    
+    native_tool_names = set(AVAILABLE_TOOLS.keys())
+    
+    final_tools = []
+    for tool in all_tools:
+        if tool.name in native_tool_names:
+            # It's a native tool, check if enabled
+            if enabled_tools is None or tool.name in enabled_tools:
+                final_tools.append(tool)
+        else:
+            # It's an MCP tool (or unknown), allow it
+            final_tools.append(tool)
 
     # Bind tools to the model
     if final_tools:
@@ -75,13 +74,23 @@ async def model_node(state: ChatState, config: RunnableConfig):
 async def tool_node_wrapper(state: ChatState):
     """
     Wrapper for ToolNode to fetch tools dynamically.
-    LangGraph's prebuilt ToolNode usually expects a static list.
-    Since our MCP tools might change content (dynamic list), we recreate the node execution.
-    Actually, for simplicity in Phase 1, let's fetch tools and use prebuilt ToolNode.
+    Ensures BOTH MCP and Native tools are available for execution.
     """
-    tools = await get_all_active_mcp_tools()
-    print(f"Executing with {len(tools)} active tools")
-    tool_node = ToolNode(tools)
+    # 1. MCP Tools
+    mcp_tools = await get_all_active_mcp_tools()
+    
+    # 2. Native Tools
+    from tools import AVAILABLE_TOOLS
+    from utils.langchain_tools import wrap_native_tool
+    
+    native_tools = []
+    for tool_instance in AVAILABLE_TOOLS.values():
+        native_tools.append(wrap_native_tool(tool_instance))
+        
+    all_tools = mcp_tools + native_tools
+    
+    print(f"ToolNode executing with {len(all_tools)} available tools")
+    tool_node = ToolNode(all_tools)
     return await tool_node.ainvoke(state)
 
 
