@@ -114,9 +114,7 @@ async def tool_node_wrapper(state: ChatState, config: RunnableConfig):
             tool_args = tool_call["args"]
             tool_call_id = tool_call["id"]
             
-            selected_tool = tool_map.get(tool_name)
-            
-            output = None
+            if selected_tool:
                 try:
                     # Inject user_id if Native Tool
                     if tool_name in native_instances and user_id:
