@@ -206,8 +206,13 @@ class ChatController:
             full_response_text = ""
             tool_steps = []
             
-            # Pass enabled_tools via config
-            config = {"configurable": {"enabled_tools": enabled_tools or []}}
+            # Pass enabled_tools and user_id via config
+            config = {
+                "configurable": {
+                    "enabled_tools": enabled_tools or [],
+                    "user_id": user_id
+                }
+            }
             
             async for event in chat_agent.astream_events(graph_input, version="v1", config=config):
                 event_type = event["event"]

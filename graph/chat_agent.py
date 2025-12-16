@@ -72,17 +72,20 @@ async def model_node(state: ChatState, config: RunnableConfig):
     return {"messages": [response]}
 
 from langchain_core.messages import ToolMessage
-from langgraph.prebuilt import ToolInvocation
 from langchain_core.tools import StructuredTool
 
-async def tool_node_wrapper(state: ChatState):
+async def tool_node_wrapper(state: ChatState, config: RunnableConfig):
     """
     Custom ToolNode that executes tools SEQUENTIALLY.
     This is required because the frontend assumes 'Start -> End' order (LIFO) for tool steps.
     Parallel execution (default ToolNode) causes race conditions in the UI.
+    Also injects 'user_id' into Native Tools.
     """
     messages = state["messages"]
     last_message = messages[-1]
+    
+    # Get user_id from config
+    user_id = config.get("configurable", {}).get("user_id")
     
     # 1. Prepare Tools Map
     mcp_tools = await get_all_active_mcp_tools()
@@ -91,8 +94,13 @@ async def tool_node_wrapper(state: ChatState):
     from utils.langchain_tools import wrap_native_tool
     
     native_tools = []
+    # Key = wrapped name, Value = native instance (to check properties)
+    native_instances = {} 
+    
     for tool_instance in AVAILABLE_TOOLS.values():
-        native_tools.append(wrap_native_tool(tool_instance))
+        wrapped = wrap_native_tool(tool_instance)
+        native_tools.append(wrapped)
+        native_instances[wrapped.name] = tool_instance
         
     all_tools = mcp_tools + native_tools
     tool_map = {t.name: t for t in all_tools}
@@ -111,6 +119,19 @@ async def tool_node_wrapper(state: ChatState):
             output = None
             if selected_tool:
                 try:
+                    # Inject user_id if Native Tool
+                    if tool_name in native_instances and user_id:
+                        # Check if tool requires user_id (or just inject it if execute accepts it)
+                        # Our native tool base class or implementation usually just takes it if present in signature.
+                        # Simple check: Does execution fail if we add it? 
+                        # Safer: Inspect the native tool instance's execute signature?
+                        # Or just rely on convention: "user_id" is standard injection.
+                        # But wait, wrap_native_tool wrapper might not pass extra args easily unless we modify args.
+                        
+                        # Actually, we wrapped it with `_async_native_wrapper` which calls `native_tool.execute(**kwargs)`.
+                        # So we can just add it to kwargs!
+                        tool_args["user_id"] = user_id
+                        
                     # Execute
                     # Support both async and sync tools (though ours are mostly async)
                     if hasattr(selected_tool, "acoroutine") and selected_tool.acoroutine:
