@@ -32,10 +32,10 @@ async def model_node(state: ChatState):
     mcp_tools = await get_all_active_mcp_tools()
     
     # Fetch Native Tools
-    from tools import tool_registry
+    from tools import AVAILABLE_TOOLS
     # Wrap native tools for LangChain
     native_tools = []
-    for tool_name, tool_instance in tool_registry._tools.items():
+    for tool_name, tool_instance in AVAILABLE_TOOLS.items():
         # Using a generic wrapper for our custom BaseTool to LangChain BaseTool
         # Check if already has .to_langchain_tool() or wrap manually
         # Ideally our native tools should be compatible or easy to wrap.
