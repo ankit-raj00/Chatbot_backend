@@ -117,30 +117,15 @@ async def tool_node_wrapper(state: ChatState, config: RunnableConfig):
             selected_tool = tool_map.get(tool_name)
             
             output = None
-            if selected_tool:
                 try:
                     # Inject user_id if Native Tool
                     if tool_name in native_instances and user_id:
-                        # Check if tool requires user_id (or just inject it if execute accepts it)
-                        # Our native tool base class or implementation usually just takes it if present in signature.
-                        # Simple check: Does execution fail if we add it? 
-                        # Safer: Inspect the native tool instance's execute signature?
-                        # Or just rely on convention: "user_id" is standard injection.
-                        # But wait, wrap_native_tool wrapper might not pass extra args easily unless we modify args.
-                        
-                        # Actually, we wrapped it with `_async_native_wrapper` which calls `native_tool.execute(**kwargs)`.
-                        # So we can just add it to kwargs!
                         tool_args["user_id"] = user_id
                         
-                    # Execute
-                    # Support both async and sync tools (though ours are mostly async)
-                    if hasattr(selected_tool, "acoroutine") and selected_tool.acoroutine:
-                         output = await selected_tool.acoroutine(**tool_args)
-                    elif hasattr(selected_tool, "_run"):
-                         output = await asyncio.to_thread(selected_tool._run, **tool_args)
-                    else:
-                         # Fallback for simple functions wrapped
-                         output = await selected_tool.ainvoke(tool_args)
+                    # Execute using standard LangChain invocation
+                    # This handles async/sync dispatch, callbacks, and config automatically.
+                    output = await selected_tool.ainvoke(tool_args, config=config)
+
                 except Exception as e:
                     output = f"Error executing {tool_name}: {str(e)}"
             else:
