@@ -4,6 +4,7 @@ import cloudinary.api
 import os
 import requests
 import tempfile
+import asyncio
 from typing import Tuple, Optional
 
 class CloudinaryHandler:
@@ -18,9 +19,9 @@ class CloudinaryHandler:
             secure=True
         )
     
-    def upload_file(self, file_path: str, folder: str = "chatbot/files") -> Tuple[str, str]:
+    async def upload_file(self, file_path: str, folder: str = "chatbot/files") -> Tuple[str, str]:
         """
-        Upload a file to Cloudinary
+        Upload a file to Cloudinary asynchronously
         
         Args:
             file_path: Path to the file to upload
@@ -30,8 +31,9 @@ class CloudinaryHandler:
             Tuple of (cloudinary_url, public_id)
         """
         try:
-            # Upload file with resource_type auto-detection
-            result = cloudinary.uploader.upload(
+            # Upload file with resource_type auto-detection in a separate thread
+            result = await asyncio.to_thread(
+                cloudinary.uploader.upload,
                 file_path,
                 folder=folder,
                 resource_type="auto",  # Auto-detect file type
@@ -44,9 +46,9 @@ class CloudinaryHandler:
             print(f"Cloudinary upload error: {e}")
             raise
     
-    def download_file(self, cloudinary_url: str) -> str:
+    async def download_file(self, cloudinary_url: str) -> str:
         """
-        Download a file from Cloudinary to a temporary location
+        Download a file from Cloudinary to a temporary location asynchronously
         
         Args:
             cloudinary_url: The Cloudinary URL to download from
@@ -55,25 +57,28 @@ class CloudinaryHandler:
             Path to the downloaded temporary file
         """
         try:
-            # Download file
-            response = requests.get(cloudinary_url, stream=True)
-            response.raise_for_status()
-            
-            # Extract file extension from URL
-            extension = cloudinary_url.split('.')[-1].split('?')[0]
-            
-            # Save to temp file
-            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{extension}") as tmp:
-                for chunk in response.iter_content(chunk_size=8192):
-                    tmp.write(chunk)
-                return tmp.name
+            # Download file in a separate thread
+            def _download():
+                response = requests.get(cloudinary_url, stream=True)
+                response.raise_for_status()
+                
+                # Extract file extension from URL
+                extension = cloudinary_url.split('.')[-1].split('?')[0]
+                
+                # Save to temp file
+                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{extension}") as tmp:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        tmp.write(chunk)
+                    return tmp.name
+
+            return await asyncio.to_thread(_download)
         except Exception as e:
             print(f"Cloudinary download error: {e}")
             raise
     
-    def delete_file(self, public_id: str) -> bool:
+    async def delete_file(self, public_id: str) -> bool:
         """
-        Delete a file from Cloudinary
+        Delete a file from Cloudinary asynchronously
         
         Args:
             public_id: The Cloudinary public_id of the file
@@ -82,7 +87,12 @@ class CloudinaryHandler:
             True if successful, False otherwise
         """
         try:
-            result = cloudinary.uploader.destroy(public_id, resource_type="auto")
+            # Delete file in a separate thread
+            result = await asyncio.to_thread(
+                cloudinary.uploader.destroy,
+                public_id,
+                resource_type="auto"
+            )
             return result.get("result") == "ok"
         except Exception as e:
             print(f"Cloudinary delete error: {e}")

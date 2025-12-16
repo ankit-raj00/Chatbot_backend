@@ -16,15 +16,7 @@ class ChatRequest(BaseModel):
     model: str = "gemini-2.5-flash"
     enabled_tools: List[str] = []
 
-@router.post("")
-async def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
-    """Process chat message with Gemini + MCP"""
-    return await chat_controller.process_chat(
-        user_id=str(current_user["_id"]),
-        message=request.message,
-        conversation_id=request.conversation_id,
-        mcp_server_url=request.mcp_server_url
-    )
+
 
 @router.post("/stream")
 async def chat_stream(request: ChatRequest, current_user: dict = Depends(get_current_user)):
@@ -44,43 +36,32 @@ async def chat_stream(request: ChatRequest, current_user: dict = Depends(get_cur
 
 @router.post("/stream/multimodal")
 async def chat_stream_multimodal(
+    user_id: str = Form(...),
     message: str = Form(...),
-    conversation_id: Optional[str] = Form(None),
-    mcp_server_urls: Optional[str] = Form(None),
+    conversation_id: str = Form(None),
+    mcp_server_urls: str = Form(None), # JSON string
     model: str = Form("gemini-2.5-flash"),
-    enabled_tools: Optional[str] = Form(None),
     images: List[UploadFile] = File(None),
+    enabled_tools: str = Form(None), # JSON string
     current_user: dict = Depends(get_current_user)
 ):
-    """Process multimodal chat message with streaming response"""
+    """Process chat message with images/files + MCP (Streaming)"""
     from fastapi.responses import StreamingResponse
     import json
     
-    # Parse mcp_server_urls from JSON string
-    parsed_urls = []
-    if mcp_server_urls:
-        try:
-            parsed_urls = json.loads(mcp_server_urls)
-        except:
-            parsed_urls = []
-    
-    # Parse enabled_tools from JSON string
-    parsed_tools = []
-    if enabled_tools:
-        try:
-            parsed_tools = json.loads(enabled_tools)
-        except:
-            parsed_tools = []
+    # Parse JSON fields
+    mcp_urls_list = json.loads(mcp_server_urls) if mcp_server_urls else None
+    enabled_tools_list = json.loads(enabled_tools) if enabled_tools else None
     
     return StreamingResponse(
-        chat_controller.process_chat_stream_multimodal(
+        chat_controller.process_chat_stream(
             user_id=str(current_user["_id"]),
             message=message,
             conversation_id=conversation_id,
-            mcp_server_urls=parsed_urls,
+            mcp_server_urls=mcp_urls_list,
             model=model,
-            images=images,
-            enabled_tools=parsed_tools
+            files=images,
+            enabled_tools=enabled_tools_list
         ),
         media_type="text/event-stream"
     )

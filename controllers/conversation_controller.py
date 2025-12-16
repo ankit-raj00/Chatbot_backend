@@ -120,7 +120,7 @@ class ConversationController:
                         if "cloudinary_public_id" in attachment:
                             try:
                                 print(f"Deleting Cloudinary file: {attachment['cloudinary_public_id']}")
-                                cloudinary_handler.delete_file(attachment['cloudinary_public_id'])
+                                await cloudinary_handler.delete_file(attachment['cloudinary_public_id'])
                             except Exception as e:
                                 print(f"Error deleting Cloudinary file {attachment['cloudinary_public_id']}: {e}")
             
