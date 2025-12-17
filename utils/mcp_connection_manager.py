@@ -40,10 +40,10 @@ class MCPConnectionManager:
             transport_config = {}
             
             if url.startswith("http://") or url.startswith("https://"):
-                # Remote SSE Server
+                # Remote Server (using http transport as per user feedback)
                 transport_config = {
                     "url": url,
-                    "transport": "sse"
+                    "transport": "http"
                 }
             elif url.endswith(".py"):
                  # Local Python Server (stdio)
