@@ -36,7 +36,6 @@ async def chat_stream(request: ChatRequest, current_user: dict = Depends(get_cur
 
 @router.post("/stream/multimodal")
 async def chat_stream_multimodal(
-    user_id: str = Form(...),
     message: str = Form(...),
     conversation_id: str = Form(None),
     mcp_server_urls: str = Form(None), # JSON string
