@@ -2,66 +2,29 @@
 Native Tools Registry
 Manages all available native tools
 """
-from tools.google_drive.list_folders import ListGoogleDriveFolders
-from tools.google_drive.create_folder import CreateGoogleDriveFolder
-from tools.utilities.roll_dice import RollDice
-from tools.utilities.get_time import GetCurrentTime
-from tools.utilities.get_weather import GetWeather
-from tools.base import BaseTool
-from typing import Dict, List, Optional
-from google.genai import types
+from typing import Dict, Optional, Any
 
+# Import Refactored Tools (StructuredTool objects)
+from tools.google_drive.list_folders import list_google_drive_folders
+from tools.google_drive.create_folder import create_google_drive_folder
+from tools.utilities.roll_dice import roll_dice
+from tools.utilities.get_time import get_current_time
+from tools.utilities.get_weather import get_weather
 
 # Registry of all available tools
-AVAILABLE_TOOLS: Dict[str, BaseTool] = {
-    # Google Drive tools
-    "list_google_drive_folders": ListGoogleDriveFolders(),
-    "create_google_drive_folder": CreateGoogleDriveFolder(),
-    
-    # Utility tools
-    "roll_dice": RollDice(),
-    "get_current_time": GetCurrentTime(),
-    "get_weather": GetWeather(),
+# Keys should match the tool name used in the LLM
+AVAILABLE_TOOLS: Dict[str, Any] = {
+    "list_google_drive_folders": list_google_drive_folders,
+    "create_google_drive_folder": create_google_drive_folder,
+    "roll_dice": roll_dice,
+    "get_current_time": get_current_time,
+    "get_weather": get_weather,
 }
 
-
-def get_tool(tool_id: str) -> Optional[BaseTool]:
-    """Get a tool by ID"""
-    return AVAILABLE_TOOLS.get(tool_id)
-
-
-def get_all_tools() -> List[BaseTool]:
-    """Get all available tools"""
+def get_tool(tool_name: str) -> Optional[Any]:
+    """Get a tool instance by name"""
+    return AVAILABLE_TOOLS.get(tool_name)
+    
+def get_all_tools() -> list:
+    """Get list of all tools"""
     return list(AVAILABLE_TOOLS.values())
-
-
-def get_tools_by_category(category: str) -> List[BaseTool]:
-    """Get tools by category"""
-    return [tool for tool in AVAILABLE_TOOLS.values() if tool.category == category]
-
-
-def get_gemini_tool_declarations() -> List[types.Tool]:
-    """
-    Convert all native tools to Gemini Tool format
-    Returns a list with a single Tool containing all function declarations
-    """
-    declarations = [tool.to_gemini_function_declaration() for tool in get_all_tools()]
-    return [types.Tool(function_declarations=declarations)]
-
-
-async def execute_tool(tool_name: str, **kwargs) -> Dict:
-    """
-    Execute a tool by name
-    
-    Args:
-        tool_name: Name of the tool to execute
-        **kwargs: Tool parameters
-    
-    Returns:
-        Tool execution result
-    """
-    tool = get_tool(tool_name)
-    if not tool:
-        raise ValueError(f"Tool '{tool_name}' not found")
-    
-    return await tool.execute(**kwargs)
