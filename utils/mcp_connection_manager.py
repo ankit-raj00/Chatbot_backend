@@ -37,12 +37,30 @@ class MCPConnectionManager:
             print(f"Registering MCP Client for: {url}")
             
             # Determine transport config
-            # For now, we assume remote URLs are SSE. 
-            # If we needed stdio, we'd need a different config structure.
-            transport_config = {
-                "url": url,
-                "transport": "sse" 
-            }
+            transport_config = {}
+            
+            if url.startswith("http://") or url.startswith("https://"):
+                # Remote SSE Server
+                transport_config = {
+                    "url": url,
+                    "transport": "sse"
+                }
+            elif url.endswith(".py"):
+                 # Local Python Server (stdio)
+                 # We assume key "command" is needed.
+                 transport_config = {
+                     "command": "python",
+                     "args": [url],
+                     "transport": "stdio"
+                 }
+            else:
+                 # Fallback/Assumption: Local executable or unknown
+                 # If it doesn't start with http, assume it's a command/path
+                 transport_config = {
+                     "command": url,
+                     "args": [],
+                     "transport": "stdio"
+                 }
             
             # Initialize Client
             # Note: We use the URL itself as the server name key
@@ -78,6 +96,20 @@ class MCPConnectionManager:
                 print(f"Error fetching tools from {url}: {e}")
                 
         return all_tools
+        
+    async def get_tools_from_server(self, url: str) -> List[BaseTool]:
+        """
+        Get LangChain compatible tools from A SPECIFIC registered client.
+        """
+        if url not in self._clients:
+             raise ValueError(f"MCP server not connected: {url}")
+             
+        client = self._clients[url]
+        try:
+             return await client.get_tools()
+        except Exception as e:
+             print(f"Error fetching tools from {url}: {e}")
+             raise e
         
     async def call_tool_by_name(self, name: str, args: dict) -> Any:
         """
