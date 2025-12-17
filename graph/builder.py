@@ -80,7 +80,7 @@ def build_graph():
         {
             "native_tool_node": "native_tool_node",
             "mcp_tool_node": "mcp_tool_node",
-            "native_tool_node,mcp_tool_node": ["native_tool_node", "mcp_tool_node"], # Parallel map
+            "native_and_mcp": ["native_tool_node", "mcp_tool_node"], # Parallel map
             "__end__": END
         }
     )

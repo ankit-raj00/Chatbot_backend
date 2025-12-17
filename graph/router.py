@@ -32,7 +32,7 @@ def route_tools(state: ChatState) -> Literal["native_tool_node", "mcp_tool_node"
             
     # Routing decision
     if has_native and has_mcp:
-        return ["native_tool_node", "mcp_tool_node"]
+        return "native_and_mcp"
     elif has_native:
         return "native_tool_node"
     elif has_mcp:
