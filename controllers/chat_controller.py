@@ -11,7 +11,7 @@ import asyncio
 
 # LangChain Imports
 from langchain_core.messages import HumanMessage, AIMessage
-from graph.chat_agent import chat_agent
+from graph.builder import chat_graph
 
 class ChatController:
     """Controller for chat operations with LangGraph + Gemini"""
@@ -137,36 +137,6 @@ class ChatController:
             
             stored_messages = await msgs_cursor.to_list(length=50) # Avoid excessive context
             
-            # We don't include the current message in history list yet, we add it as input
-            # But we might need to process previous files in history
-            
-            for msg in stored_messages[:-1]: # Exclude list item if it was just inserted? No, we just inserted it.
-                # Actually, we just inserted the current message above. 
-                # Let's filter it out or just build everything excluding the one we just inserted?
-                # Safer: Load history BEFORE inserting current message? 
-                # Or just load everything and filter by ID != inserted ID.
-                # Simplest: Build history from DB, but we already have the `files_content_parts` for the NEW message.
-                pass 
-            
-            # Re-query is safer to get clean state, but let's stick to: 
-            # Load stored messages excluding the one we just created (based on time or ID if we tracked it)
-            # Optimization: Just load history before insert.
-            # Fix: I'll trust the flow: History + New Message input.
-            
-            # Correction: Let's re-read history properly.
-            previous_messages_cursor = messages_collection.find({
-                "conversation_id": conversation_id,
-                "user_id": user_id,
-                "content": {"$ne": message} # Simple filter, or skip last.
-            }).sort("timestamp", 1)
-            # Actually better: Just read all and convert.
-            # But for the *Input* to the graph, we usually pass history + new message.
-            
-            # Let's convert stored history to LangChain BaseMessages
-            # Note: File expiry re-upload logic is preserved from native?
-            # Yes, we should handle expiry. (Skipping complex re-upload code for brevity in this step,
-            # but usually we'd check expiry here. Assuming valid URIs for now).
-            
             for msg in stored_messages:
                  if str(msg.get("_id")) == str(conversation_id): continue # Skip conversation logic if mixed? No.
                  # Skip the current message we just inserted (logic match)
@@ -210,58 +180,83 @@ class ChatController:
             config = {
                 "configurable": {
                     "enabled_tools": enabled_tools or [],
-                    "user_id": user_id
+                    "user_id": user_id,
+                    "model": model
                 }
             }
             
-            async for event in chat_agent.astream_events(graph_input, version="v1", config=config):
-                event_type = event["event"]
-                
-                # Stream Tokens
-                if event_type == "on_chat_model_stream":
-                    chunk = event["data"]["chunk"]
-                    if chunk.content:
-                        content_str = ""
-                        if isinstance(chunk.content, list):
-                            # Ensure we only append text parts if it's a list
-                            # or just stringify if appropriate, but usually list implies multimodal response parts.
-                            # For simple chat stream, we probably just want the text.
-                            for part in chunk.content:
-                                if isinstance(part, str):
-                                    content_str += part
-                                elif isinstance(part, dict) and "text" in part:
-                                    content_str += part["text"]
+            async for event in chat_graph.astream_events(graph_input, version="v1", config=config):
+                try:
+                    if not isinstance(event, dict):
+                         print(f"⚠️ Warning: Event is not a dict: {type(event)}")
+                         continue
+                         
+                    event_type = event.get("event")
+                    
+                    # Stream Tokens
+                    if event_type == "on_chat_model_stream":
+                        data = event.get("data", {})
+                        if not isinstance(data, dict):
+                             # Fallback/Debug
+                             print(f"⚠️ data is not dict: {type(data)} in event {event_type}")
+                             continue
+
+                        chunk = data.get("chunk")
+                        if chunk and hasattr(chunk, "content") and chunk.content:
+                            content_str = ""
+                            if isinstance(chunk.content, list):
+                                # Ensure we only append text parts if it's a list
+                                # or just stringify if appropriate, but usually list implies multimodal response parts.
+                                # For simple chat stream, we probably just want the text.
+                                for part in chunk.content:
+                                    if isinstance(part, str):
+                                        content_str += part
+                                    elif isinstance(part, dict) and "text" in part:
+                                        content_str += part["text"]
+                            else:
+                                content_str = str(chunk.content)
+                                
+                            full_response_text += content_str
+                            yield f"data: {json.dumps({'chunk': content_str})}\n\n"
+                    
+                    # Tool Events
+                    elif event_type == "on_tool_start":
+                        tool_name = event.get("name")
+                        data = event.get("data", {})
+                        tool_args = data.get("input")
+                        yield f"data: {json.dumps({'status': f'Using tool: {tool_name}'})}\n\n"
+                        yield f"data: {json.dumps({'tool_call': {'name': tool_name, 'args': tool_args}})}\n\n"
+                        
+                        tool_steps.append({
+                            "name": tool_name,
+                            "args": tool_args,
+                            "status": "running"
+                        })
+                        
+                    elif event_type == "on_tool_end":
+                        tool_name = event.get("name")
+                        data = event.get("data", {})
+                        if not isinstance(data, dict):
+                             print(f"⚠️ tool_end data is not dict: {type(data)}")
+                             # Try to salvage if it's an object?
+                             output = str(data)
                         else:
-                            content_str = str(chunk.content)
-                            
-                        full_response_text += content_str
-                        yield f"data: {json.dumps({'chunk': content_str})}\n\n"
-                
-                # Tool Events
-                elif event_type == "on_tool_start":
-                    tool_name = event["name"]
-                    tool_args = event["data"].get("input")
-                    yield f"data: {json.dumps({'status': f'Using tool: {tool_name}'})}\n\n"
-                    yield f"data: {json.dumps({'tool_call': {'name': tool_name, 'args': tool_args}})}\n\n"
-                    
-                    tool_steps.append({
-                        "name": tool_name,
-                        "args": tool_args,
-                        "status": "running"
-                    })
-                    
-                elif event_type == "on_tool_end":
-                    tool_name = event["name"]
-                    output = event["data"].get("output")
-                    yield f"data: {json.dumps({'tool_output': {'name': tool_name, 'result': str(output)}})}\n\n"
-                    
-                    # Update tool steps? Simple append for now
-                    if tool_steps and tool_steps[-1]["name"] == tool_name:
-                         tool_steps[-1]["result"] = str(output)
-                         tool_steps[-1]["status"] = "completed"
-                    else:
-                         # Fallback if ordering is weird (async)
-                         pass
+                             output = data.get("output")
+                        
+                        yield f"data: {json.dumps({'tool_output': {'name': tool_name, 'result': str(output)}})}\n\n"
+                        
+                        # Update tool steps? Simple append for now
+                        if tool_steps and tool_steps[-1]["name"] == tool_name:
+                             tool_steps[-1]["result"] = str(output)
+                             tool_steps[-1]["status"] = "completed"
+                        else:
+                             # Fallback if ordering is weird (async)
+                             pass
+                             
+                except Exception as loop_e:
+                    print(f"Error processing event {event}: {loop_e}")
+                    # Don't break the loop, try next event
+                    continue
 
             # 9. Save Assistant Response (Unchanged Persistence)
             await messages_collection.insert_one({

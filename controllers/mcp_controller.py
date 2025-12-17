@@ -1,74 +1,44 @@
 from fastapi import HTTPException
-try:
-    from fastmcp import Client
-except ImportError:
-    Client = None
-from contextlib import AsyncExitStack
+from utils.mcp_connection_manager import mcp_manager
 
 class MCPController:
     """Controller for MCP operations"""
     
     def __init__(self):
-        self.local_mcp_client = None
-
-    def _get_local_client(self):
-        """Lazily initialize local client"""
-        try:
-            if not self.local_mcp_client:
-                import pathlib
-                mcp_server_path = pathlib.Path(__file__).parent.parent / "services" / "mcp_server.py"
-                try:
-                    self.local_mcp_client = Client(str(mcp_server_path))
-                except Exception as e:
-                    print(f"Warning: Failed to initialize local MCP client: {e}")
-                    return None
-            return self.local_mcp_client
-        except Exception:
-            return None
+        pass
     
     async def connect_and_list_tools(self, mcp_server_url: str = None):
-        """Connect to MCP server and list available tools"""
+        """Connect to MCP server and list available tools via Manager"""
         tools_info = []
         
         try:
-            async with AsyncExitStack() as stack:
-                # Get local tools
-                local_client = self._get_local_client()
-                if local_client:
-                    try:
-                        await stack.enter_async_context(local_client)
-                        local_tools = await local_client.list_tools()
-                        for tool in local_tools:
-                            tools_info.append({
-                                "name": tool.name,
-                                "description": tool.description,
-                                "source": "Local"
-                            })
-                    except Exception as e:
-                        print(f"Error listing local tools: {e}")
-
-                # Get remote tools if URL provided
-                if mcp_server_url:
-                    if Client is None:
-                        raise ImportError("fastmcp module is not installed. Cannot connect to remote server.")
-                        
-                    remote_client = Client(mcp_server_url)
-                    await stack.enter_async_context(remote_client)
-                    remote_tools = await remote_client.list_tools()
-                    for tool in remote_tools:
-                        tools_info.append({
-                            "name": tool.name,
-                            "description": tool.description,
-                            "source": "Remote"
-                        })
+            # 1. Connect if URL provided
+            if mcp_server_url:
+                success = await mcp_manager.connect(mcp_server_url)
+                if not success:
+                     raise HTTPException(
+                        status_code=400,
+                        detail=f"Failed to connect to {mcp_server_url}"
+                    )
+            
+            # 2. Get All Tools (from all connected servers)
+            # Note: This aggregates tools from all active connections
+            langchain_tools = await mcp_manager.get_all_langchain_tools()
+            
+            for tool in langchain_tools:
+                tools_info.append({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "source": "Remote" # Simplified: Manager abstracts source
+                })
                         
             return {"status": "success", "tools": tools_info}
             
         except Exception as e:
-            print(f"Error connecting to MCP: {e}")
+            print(f"Error in MCP Connect/List: {e}")
             if mcp_server_url:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Failed to connect to remote server: {str(e)}"
+                    detail=str(e)
                 )
             return {"status": "error", "detail": str(e)}

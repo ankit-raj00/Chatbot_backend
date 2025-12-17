@@ -1,49 +1,24 @@
 """
 Utility tool: Get weather (mock implementation)
 """
-from tools.base import BaseTool
-from typing import Any, Dict
+from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 import random
 
+class GetWeatherArgs(BaseModel):
+    location: str = Field(description="City name or location")
 
-class GetWeather(BaseTool):
-    """Get weather information (mock)"""
+@tool(args_schema=GetWeatherArgs)
+def get_weather(location: str):
+    """Get current weather information for a location"""
+    # Mock weather data
+    conditions = ["Sunny", "Cloudy", "Rainy", "Partly Cloudy"]
+    temp = random.randint(15, 30)
+    condition = random.choice(conditions)
     
-    @property
-    def name(self) -> str:
-        return "get_weather"
-    
-    @property
-    def description(self) -> str:
-        return "Get current weather information for a location"
-    
-    @property
-    def category(self) -> str:
-        return "utilities"
-    
-    @property
-    def parameters(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "location": {
-                    "type": "string",
-                    "description": "City name or location"
-                }
-            },
-            "required": ["location"]
-        }
-    
-    async def execute(self, location: str) -> Dict[str, Any]:
-        """Execute the tool (mock implementation)"""
-        # Mock weather data
-        conditions = ["Sunny", "Cloudy", "Rainy", "Partly Cloudy"]
-        temp = random.randint(15, 30)
-        condition = random.choice(conditions)
-        
-        return {
-            "result": f"Weather in {location}: {condition}, {temp}°C",
-            "location": location,
-            "temperature": temp,
-            "condition": condition
-        }
+    return {
+        "result": f"Weather in {location}: {condition}, {temp}°C",
+        "location": location,
+        "temperature": temp,
+        "condition": condition
+    }
