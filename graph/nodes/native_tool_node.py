@@ -6,7 +6,7 @@ from typing import Dict, Any, List
 from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableConfig
 from graph.nodes.common import ChatState
-from tools import get_tool
+from tools import get_tool, AVAILABLE_TOOLS
 
 async def native_tool_node(state: ChatState, config: RunnableConfig) -> Dict[str, Any]:
     """
