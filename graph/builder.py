@@ -77,7 +77,7 @@ def build_graph():
     builder.add_conditional_edges(
         "chat_model",
         route_tools,
-        ["native_tool_node", "mcp_tool_node"]
+        ["native_tool_node", "mcp_tool_node", END]
     )
     
     # Return from tools back to model
