@@ -24,8 +24,8 @@ class ToolController:
                     "tool_id": tool.name,
                     "name": tool.name.replace("_", " ").title(),
                     "description": tool.description,
-                    "category": tool.category,
-                    "requires_auth": tool.requires_auth,
+                    "category": tool.metadata.get("category", "general"),
+                    "requires_auth": tool.metadata.get("requires_auth", False),
                     "is_enabled": True
                 }
                 for tool in tools
@@ -52,7 +52,7 @@ class ToolController:
                     "tool_id": tool.name,
                     "name": tool.name.replace("_", " ").title(),
                     "description": tool.description,
-                    "requires_auth": tool.requires_auth
+                    "requires_auth": tool.metadata.get("requires_auth", False)
                 }
                 for tool in tools
             ]

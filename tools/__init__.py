@@ -37,11 +37,15 @@ def get_all_tools() -> list:
     """Get list of all tools with injected metadata for Controller compatibility"""
     tools = []
     for name, tool in AVAILABLE_TOOLS.items():
-        # Monkey-patch metadata for the controller's benefit
-        # (The controller expects .category and .requires_auth)
+        # Inject metadata into the StructuredTool's metadata dict
+        # This is the safe way to attach extra info
         metadata = TOOL_METADATA.get(name, {})
-        tool.category = metadata.get("category", "general")
-        tool.requires_auth = metadata.get("requires_auth", False)
+        # Ensure metadata dict exists (it should, but safety first)
+        if tool.metadata is None:
+            tool.metadata = {}
+            
+        tool.metadata["category"] = metadata.get("category", "general")
+        tool.metadata["requires_auth"] = metadata.get("requires_auth", False)
         tools.append(tool)
     return tools
 
@@ -51,7 +55,9 @@ def get_tools_by_category(category: str) -> List[Any]:
     for name, tool in AVAILABLE_TOOLS.items():
         metadata = TOOL_METADATA.get(name, {})
         if metadata.get("category") == category:
-            tool.category = category
-            tool.requires_auth = metadata.get("requires_auth", False)
+            if tool.metadata is None:
+                tool.metadata = {}
+            tool.metadata["category"] = category
+            tool.metadata["requires_auth"] = metadata.get("requires_auth", False)
             filtered_tools.append(tool)
     return filtered_tools

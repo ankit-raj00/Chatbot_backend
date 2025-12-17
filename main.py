@@ -90,8 +90,8 @@ async def startup_event():
                         "tool_id": tool.name,
                         "name": tool.name,
                         "description": tool.description,
-                        "category": tool.category,
-                        "requires_auth": tool.requires_auth,
+                        "category": tool.metadata.get("category", "general"),
+                        "requires_auth": tool.metadata.get("requires_auth", False),
                         "is_enabled": True,
                         "updated_at": datetime.now()
                     }},
