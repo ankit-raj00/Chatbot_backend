@@ -7,6 +7,7 @@ from typing import Optional, Any, Dict
 
 class CreateFolderArgs(BaseModel):
     folder_name: str = Field(description="Name of the folder to create")
+    user_id: Optional[str] = Field(None, description="User ID (injected automatically)")
 
 @tool(args_schema=CreateFolderArgs)
 async def create_google_drive_folder(folder_name: str, user_id: Optional[str] = None) -> Dict[str, Any]:

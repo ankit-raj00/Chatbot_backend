@@ -7,6 +7,7 @@ from typing import Optional, Any, Dict
 
 class ListFoldersArgs(BaseModel):
     page_size: int = Field(default=100, description="Number of folders to return (default: 100)")
+    user_id: Optional[str] = Field(None, description="User ID (injected automatically)")
 
 @tool(args_schema=ListFoldersArgs)
 async def list_google_drive_folders(page_size: int = 100, user_id: Optional[str] = None) -> Dict[str, Any]:
