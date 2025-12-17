@@ -6,6 +6,7 @@ from typing import Dict, Any, List
 from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableConfig
 from graph.nodes.common import ChatState
+from tools import AVAILABLE_TOOLS
 from utils.mcp_connection_manager import mcp_manager
 
 async def mcp_tool_node(state: ChatState, config: RunnableConfig) -> Dict[str, Any]:
@@ -21,6 +22,11 @@ async def mcp_tool_node(state: ChatState, config: RunnableConfig) -> Dict[str, A
         tool_name = tool_call["name"]
         tool_args = tool_call["args"]
         tool_call_id = tool_call["id"]
+        
+        # 0. Filter: Only handle MCP Tools
+        if tool_name in AVAILABLE_TOOLS:
+            # Skip Native tools (handled by native_tool_node)
+            continue
         
         try:
             # Execute via manager

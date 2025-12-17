@@ -24,6 +24,11 @@ async def native_tool_node(state: ChatState, config: RunnableConfig) -> Dict[str
         tool_args = tool_call["args"]
         tool_call_id = tool_call["id"]
         
+        # 0. Filter: Only handle Native Tools
+        if tool_name not in AVAILABLE_TOOLS:
+            # Skip MCP tools (handled by mcp_tool_node)
+            continue
+            
         # 1. Get Tool Instance
         tool_instance = get_tool(tool_name)
         
