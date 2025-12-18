@@ -257,6 +257,7 @@ class ChatController:
                         tool_name = event.get("name")
                         data = event.get("data", {})
                         tool_args = data.get("input")
+                        
                         yield f"data: {json.dumps({'status': f'Using tool: {tool_name}'})}\n\n"
                         yield f"data: {json.dumps({'tool_call': {'name': tool_name, 'args': tool_args}})}\n\n"
                         
@@ -283,6 +284,7 @@ class ChatController:
                              tool_steps[-1]["result"] = str(output)
                              tool_steps[-1]["status"] = "completed"
                         else:
+
                              # Fallback if ordering is weird (async)
                              pass
                              
