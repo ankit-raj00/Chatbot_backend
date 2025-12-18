@@ -19,8 +19,10 @@ class UserController:
             
             media_list = []
             for msg in messages:
-                if "attachments" in msg:
-                    for attachment in msg["attachments"]:
+                # Robust check: Ensure attachments exists and is a list (not None)
+                attachments = msg.get("attachments")
+                if attachments and isinstance(attachments, list):
+                    for attachment in attachments:
                         # Enrich attachment with message context
                         media_item = attachment.copy()
                         media_item["message_id"] = str(msg["_id"])
