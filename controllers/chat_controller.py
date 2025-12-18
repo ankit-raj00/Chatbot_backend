@@ -167,6 +167,39 @@ class ChatController:
             
             input_message = HumanMessage(content=current_message_content)
             
+            # 6.5. Fetch MCP Context (Resources & Prompts)
+            try:
+                available_resources = await mcp_manager.get_available_resources()
+                available_prompts = await mcp_manager.get_available_prompts()
+                
+                system_context = ""
+                
+                # INJECT RESOURCES
+                if available_resources:
+                    system_context += "### Available MCP Context Resources\n"
+                    system_context += "You can use the `read_mcp_resource` tool to read these if needed for context:\n"
+                    for r in available_resources:
+                        system_context += f"- **{r['name']}** ({r['mimeType']})\n  URI: `{r['uri']}`\n  Description: {r['description']}\n"
+                    system_context += "\n"
+
+                # INJECT PROMPTS
+                if available_prompts:
+                    system_context += "### Available MCP Prompts\n"
+                    system_context += "These are standard prompt templates provided by the server. You can use them to guide your actions or structure your responses if relevant:\n"
+                    for p in available_prompts:
+                        args_str = ", ".join([f"{arg['name']}" for arg in p.get('arguments', [])])
+                        system_context += f"- **{p['name']}**: {p['description']}\n  Arguments: {args_str}\n"
+                    system_context += "\n"
+                
+                if system_context:
+                    from langchain_core.messages import SystemMessage
+                    # Prepend SystemMessage to history
+                    # We add it as the VERY first message to act as a high-level instruction
+                    history_messages.insert(0, SystemMessage(content=system_context))
+                    
+            except Exception as e:
+                print(f"Failed to fetch MCP context: {e}")
+
             # Graph State
             graph_input = {
                 "messages": history_messages + [input_message]

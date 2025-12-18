@@ -143,7 +143,103 @@ class MCPConnectionManager:
     async def disconnect_all(self):
         self._clients.clear()
         
-    # Note: Resource caching is removed as MultiServerMCPClient abstracts the session.
+    async def get_available_resources(self) -> List[Dict]:
+        """Aggregate resources from all clients (Robust Metadata Version)"""
+        all_resources = []
+        for url, client in self._clients.items():
+            try:
+                # Use session context to access RAW MCP features (bypassing LangChain's buggy helpers)
+                async with client.session(url) as session:
+                    # session.list_resources() returns ListResourcesResult
+                    result = await session.list_resources()
+                    
+                    if result and result.resources:
+                        print(f"--- Fetched Resources from {url} ---")
+                        for r in result.resources:
+                            # Standard attributes on MCP Resource object
+                            uri = r.uri
+                            name = r.name
+                            desc = r.description or "No description provided"
+                            mime_type = r.mimeType or "application/octet-stream"
+                            
+                            # Debug Print for User
+                            print(f"Resource found: {name} ({uri})")
+                            print(f"  > Description: {desc}")
+                            print(f"  > MimeType: {mime_type}")
+                            
+                            all_resources.append({
+                                "uri": uri,
+                                "name": name,
+                                "description": desc,
+                                "mimeType": mime_type,
+                                "source_url": url
+                            })
+                        print("---------------------------------------")
+            except Exception as e:
+                print(f"Error fetching resources from {url}: {e}")
+        return all_resources
+        
+    async def load_resource(self, uri: str) -> str:
+        """Load a resource content"""
+        # Try all clients to find who owns the URI
+        # Optimally we would map URI schemes to servers, but simple iteration works for now.
+        for url, client in self._clients.items():
+            try:
+                async with client.session(url) as session:
+                    # Create ReadResourceRequest? or helper?
+                    # session.read_resource(uri) usually works
+                    result = await session.read_resource(uri)
+                    # result.contents is list of TextResourceContents or BlobResourceContents
+                    if result and result.contents:
+                        # Concatenate contents? usually just one
+                        content_str = ""
+                        for c in result.contents:
+                             if hasattr(c, "text") and c.text:
+                                 content_str += c.text
+                             elif hasattr(c, "blob") and c.blob:
+                                 content_str += f"[Blob: {c.mimeType}]"
+                        return content_str
+            except Exception:
+                # Not found on this server or error, try next
+                continue
+                
+        raise ValueError(f"Resource not found: {uri}")
+
+    async def get_available_prompts(self) -> List[Dict]:
+        """Aggregate prompts from all clients"""
+        all_prompts = []
+        for url, client in self._clients.items():
+            try:
+                async with client.session(url) as session:
+                    result = await session.list_prompts()
+                    if result and result.prompts:
+                        for p in result.prompts:
+                            all_prompts.append({
+                                "name": p.name,
+                                "description": p.description,
+                                "arguments": [
+                                    {"name": arg.name, "description": arg.description, "required": arg.required}
+                                    for arg in (p.arguments or [])
+                                ],
+                                "source_url": url
+                            })
+            except Exception as e:
+                print(f"Error fetching prompts from {url}: {e}")
+        return all_prompts
+    
+    async def get_prompt(self, name: str, arguments: Dict[str, Any] = None) -> Any:
+        """Get/Execute a prompt"""
+        # We need to find the server that has this prompt.
+        for url, client in self._clients.items():
+            try:
+                async with client.session(url) as session:
+                     result = await session.get_prompt(name, arguments)
+                     return result
+            except Exception:
+                continue
+        raise ValueError(f"Prompt not found: {name}")
+
+    # Note: Resource caching is handled by the client/session now.
     def get_cached_resources(self, url: str) -> List:
         return []
 

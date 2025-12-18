@@ -5,7 +5,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # MongoDB connection
-MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://raj12367633:380axF9NzjbW8DaG@cluster0.ely96.mongodb.net/")
+# MongoDB connection
+MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
+
+if not MONGO_URI:
+    # Fallback for local development WITHOUT credentials if needed, or raise error
+    # Better to raise error to prevent silent failures or unintended local connections
+    raise ValueError("Missing MONGO_URI or MONGODB_URL environment variable")
+
 client = AsyncIOMotorClient(MONGO_URI)
 db = client.gemini_mcp_chat
 

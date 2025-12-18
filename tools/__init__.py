@@ -10,6 +10,7 @@ from tools.google_drive.create_folder import create_google_drive_folder
 from tools.utilities.roll_dice import roll_dice
 from tools.utilities.get_time import get_current_time
 from tools.utilities.get_weather import get_weather
+from tools.utilities.read_mcp_resource import read_mcp_resource
 
 # Registry
 AVAILABLE_TOOLS: Dict[str, Any] = {
@@ -18,6 +19,7 @@ AVAILABLE_TOOLS: Dict[str, Any] = {
     "roll_dice": roll_dice,
     "get_current_time": get_current_time,
     "get_weather": get_weather,
+    "read_mcp_resource": read_mcp_resource,
 }
 
 # Metadata Registry to support legacy Controller fields
@@ -27,6 +29,7 @@ TOOL_METADATA = {
     "roll_dice": {"category": "utilities", "requires_auth": False},
     "get_current_time": {"category": "utilities", "requires_auth": False},
     "get_weather": {"category": "utilities", "requires_auth": False},
+    "read_mcp_resource": {"category": "utilities", "requires_auth": False},
 }
 
 def get_tool(tool_name: str) -> Optional[Any]:
