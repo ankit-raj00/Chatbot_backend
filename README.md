@@ -1,7 +1,7 @@
 
-# 🧠 Gemini MCP Agent Backend
+# 🧠 Agent X Backend
 
-The advanced backend service for the Gemini MCP Agent, built with **FastAPI**, **LangGraph**, and **LangChain**.
+The advanced backend service for the  Agent X, built with **FastAPI**, **LangGraph**, and **LangChain**.
 This system serves as an intelligent host that orchestrates interactions between the **Gemini 2.5 Flash** LLM and the **Model Context Protocol (MCP)** ecosystem.
 
 ## 🏗️ Architecture Overview
