@@ -115,7 +115,7 @@ class ConversationController:
             cloudinary_handler = CloudinaryHandler()
             
             async for msg in messages_cursor:
-                if "attachments" in msg:
+                if msg.get("attachments"):
                     for attachment in msg["attachments"]:
                         if "cloudinary_public_id" in attachment:
                             try:
