@@ -1,5 +1,5 @@
 
-# 🧠 Agent X Backend
+# 🧠 AgentX Backend
 
 The advanced backend service for the  Agent X, built with **FastAPI**, **LangGraph**, and **LangChain**.
 This system serves as an intelligent host that orchestrates interactions between the **Gemini 2.5 Flash** LLM and the **Model Context Protocol (MCP)** ecosystem.
