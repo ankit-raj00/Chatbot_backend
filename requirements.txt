@@ -26,14 +26,10 @@ llama-parse
 qdrant-client
 langchain-community
 langchain-qdrant
-langchain-unstructured
-nest_asyncio
-google-generativeai
-google-genai
-# Heavy libraries causing build errors (enable one by one)
-unstructured
 langchain_tavily
-python-magic-bin ; sys_platform == 'win32'
-# ezdxf
-# libratom
-# pillow  
+nest_asyncio
+
+# Optional heavy dependencies (disabled for Vercel 500MB lambda limit)
+# unstructured
+# langchain-unstructured
+# python-magic-bin ; sys_platform == 'win32'
