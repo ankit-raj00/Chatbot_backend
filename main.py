@@ -24,48 +24,18 @@ from routes.mcp_server_routes import router as mcp_server_router
 from routes.oauth_routes import router as oauth_router
 from routes.tool_routes import router as tool_router
 from routes.auth_status_routes import router as auth_status_router
+from routes.auth_status_routes import router as auth_status_router
 from routes.user_routes import router as user_router
+from routes.upload_routes import router as upload_router
+from routes.rag_routes import router as rag_router
 
-# Create FastAPI app
-app = FastAPI(
-    title="Gemini MCP Chat API",
-    description="Complete authentication system with Gemini + MCP integration",
-    version="1.0.0"
-)
+from contextlib import asynccontextmanager
 
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "https://chatbot-backend-beta-nine.vercel.app",
-        "https://chatbot-khaki-eta-53.vercel.app"
-        
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    import time
-    start_time = time.time()
-    print(f"Incoming request: {request.method} {request.url}")
-    try:
-        response = await call_next(request)
-        process_time = time.time() - start_time
-        print(f"Request completed: {request.method} {request.url} - Status: {response.status_code} - Time: {process_time:.4f}s")
-        return response
-    except Exception as e:
-        print(f"Request failed: {request.method} {request.url} - Error: {str(e)}")
-        raise e
-
-# Startup event to initialize native tools
-@app.on_event("startup")
-async def startup_event():
-    """Initialize native tools on startup"""
+# Lifespan event handler
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan events for initialization and cleanup"""
+    # Startup: Initialize native tools
     try:
         from core.database import tools_collection
         from tools import get_all_tools
@@ -112,19 +82,49 @@ async def startup_event():
         # Don't fail startup if tools registration fails
         pass
 
-            
-    except Exception as e:
-        print(f"❌ Critical Error in Startup Event: {e}")
-        # We generally don't want to raise here in Vercel, as it crashes the whole lambda
-        # Instead we log it and let the app start without MCPs
-        pass
+    yield # App is running
 
-# Shutdown event to cleanup MCP connections
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup MCP connections on shutdown"""
+    # Shutdown: Cleanup MCP connections
+    print("🧹 Shutting down: Cleaning up MCP connections")
     from utils.mcp_connection_manager import mcp_manager
     await mcp_manager.disconnect_all()
+
+# Create FastAPI app with lifespan
+app = FastAPI(
+    title="Gemini MCP Chat API",
+    description="Complete authentication system with Gemini + MCP integration",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "https://chatbot-backend-beta-nine.vercel.app",
+        "https://chatbot-khaki-eta-53.vercel.app"
+        
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    import time
+    start_time = time.time()
+    print(f"Incoming request: {request.method} {request.url}")
+    try:
+        response = await call_next(request)
+        process_time = time.time() - start_time
+        print(f"Request completed: {request.method} {request.url} - Status: {response.status_code} - Time: {process_time:.4f}s")
+        return response
+    except Exception as e:
+        print(f"Request failed: {request.method} {request.url} - Error: {str(e)}")
+        raise e
 
 # Include routers
 app.include_router(auth_router)
@@ -135,7 +135,11 @@ app.include_router(mcp_server_router)
 app.include_router(oauth_router)
 app.include_router(tool_router)
 app.include_router(auth_status_router)
+app.include_router(auth_status_router)
 app.include_router(user_router)
+app.include_router(upload_router)
+app.include_router(rag_router)
+
 
 @app.get("/")
 async def root():

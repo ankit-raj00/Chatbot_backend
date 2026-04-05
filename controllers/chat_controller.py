@@ -18,9 +18,9 @@ class ChatController:
     
     def __init__(self):
         # Initialize Gemini Client for File Uploads (Native)
-        api_key = os.getenv("GEMINI_API_KEY")
+        api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:
-            raise ValueError("GEMINI_API_KEY environment variable not set")
+            raise ValueError("GOOGLE_API_KEY environment variable not set")
         self.gemini_client = genai.Client(api_key=api_key)
 
     async def process_chat_stream(
@@ -31,6 +31,7 @@ class ChatController:
         mcp_server_urls: list[str] = None, 
         model: str = "gemini-2.5-flash", 
         enabled_tools: list[str] = None,
+        selected_files: list[str] = None,
         files: list = None
     ):
         """Process chat message with LangGraph streaming response"""
@@ -191,18 +192,41 @@ class ChatController:
                         system_context += f"- **{p['name']}**: {p['description']}\n  Arguments: {args_str}\n"
                     system_context += "\n"
                 
+                # --- CORE AGENT SYSTEM PROMPT ---
+                core_system_prompt = (
+                    "You are AgentX, a powerful and capable AI coding assistant and researcher.\n"
+                    "You have access to a variety of tools, including Google Drive, Weather, and a custom Knowledge Base (RAG).\n\n"
+                    "### YOUR TOOLS:\n"
+                    "- **search_knowledge_base**: Use this to search file contents that the user has selected. "
+                    "You MUST use this tool if the user asks about their files, resume, or documents. "
+                    "Do NOT refuse to use this tool for 'personal' files; the user wants you to analyze them.\n"
+                    "- **read_document_page**: Use this to read the full text of a specific page if the search results are truncated or if you need more context.\n"
+                    "- **list_google_drive_folders** / **create_google_drive_folder**: Manage Drive files.\n\n"
+                    "### INSTRUCTIONS:\n"
+                    "1. Always check your available tools before refusing a request.\n"
+                    "2. If the user selects files (Context Files), prioritze searching them using `search_knowledge_base`.\n"
+                    "3. Combine tool outputs to give a comprehensive answer.\n"
+                    "4. If you encounter an error, explain it clearly to the user.\n"
+                )
+
                 if system_context:
-                    from langchain_core.messages import SystemMessage
-                    # Prepend SystemMessage to history
-                    # We add it as the VERY first message to act as a high-level instruction
-                    history_messages.insert(0, SystemMessage(content=system_context))
+                    # Append MCP context to the core prompt
+                    final_system_message = f"{core_system_prompt}\n\n{system_context}"
+                else:
+                    final_system_message = core_system_prompt
+
+                from langchain_core.messages import SystemMessage
+                # Prepend SystemMessage to history
+                # We add it as the VERY first message to act as a high-level instruction
+                history_messages.insert(0, SystemMessage(content=final_system_message))
                     
             except Exception as e:
                 print(f"Failed to fetch MCP context: {e}")
 
             # Graph State
             graph_input = {
-                "messages": history_messages + [input_message]
+                "messages": history_messages + [input_message],
+                "selected_files": selected_files
             }
 
             # 8. Run LangGraph & Stream to Client

@@ -3,7 +3,7 @@ from controllers.mcp_server_controller import MCPServerController
 from models.mcp_server import MCPServerCreate, MCPServerUpdate
 from core.middleware import get_current_user
 
-router = APIRouter(prefix="/mcp-servers", tags=["MCP Servers"])
+router = APIRouter(prefix="/api/v1/mcp-servers", tags=["MCP Servers"])
 
 @router.get("")
 async def get_servers(current_user: dict = Depends(get_current_user)):

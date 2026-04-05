@@ -11,6 +11,8 @@ from tools.utilities.roll_dice import roll_dice
 from tools.utilities.get_time import get_current_time
 from tools.utilities.get_weather import get_weather
 from tools.utilities.read_mcp_resource import read_mcp_resource
+from rag.tools.retrieval_tool import search_knowledge_base
+from rag.tools.doc_store_tools import read_document_page
 
 # Registry
 AVAILABLE_TOOLS: Dict[str, Any] = {
@@ -20,6 +22,8 @@ AVAILABLE_TOOLS: Dict[str, Any] = {
     "get_current_time": get_current_time,
     "get_weather": get_weather,
     "read_mcp_resource": read_mcp_resource,
+    "search_knowledge_base": search_knowledge_base,
+    "read_document_page": read_document_page,
 }
 
 # Metadata Registry to support legacy Controller fields
@@ -30,6 +34,8 @@ TOOL_METADATA = {
     "get_current_time": {"category": "utilities", "requires_auth": False},
     "get_weather": {"category": "utilities", "requires_auth": False},
     "read_mcp_resource": {"category": "utilities", "requires_auth": False},
+    "search_knowledge_base": {"category": "rag", "requires_auth": False},
+    "read_document_page": {"category": "rag", "requires_auth": False},
 }
 
 def get_tool(tool_name: str) -> Optional[Any]:
