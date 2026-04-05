@@ -21,3 +21,4 @@ class ChatState(TypedDict):
     conversation_id: Optional[str]
     enabled_tools: List[str]
     mcp_server_urls: List[str]
+    selected_files: Optional[List[str]]

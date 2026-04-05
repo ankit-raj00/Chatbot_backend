@@ -15,6 +15,7 @@ class ChatRequest(BaseModel):
     mcp_server_urls: List[str] = []
     model: str = "gemini-2.5-flash"
     enabled_tools: List[str] = []
+    selected_files: List[str] = []
 
 
 
@@ -29,7 +30,8 @@ async def chat_stream(request: ChatRequest, current_user: dict = Depends(get_cur
             conversation_id=request.conversation_id,
             mcp_server_urls=request.mcp_server_urls,
             model=request.model,
-            enabled_tools=request.enabled_tools
+            enabled_tools=request.enabled_tools,
+            selected_files=request.selected_files
         ),
         media_type="text/event-stream"
     )
@@ -42,6 +44,7 @@ async def chat_stream_multimodal(
     model: str = Form("gemini-2.5-flash"),
     images: List[UploadFile] = File(None),
     enabled_tools: str = Form(None), # JSON string
+    selected_files: str = Form(None), # JSON string
     current_user: dict = Depends(get_current_user)
 ):
     """Process chat message with images/files + MCP (Streaming)"""
@@ -51,6 +54,7 @@ async def chat_stream_multimodal(
     # Parse JSON fields
     mcp_urls_list = json.loads(mcp_server_urls) if mcp_server_urls else None
     enabled_tools_list = json.loads(enabled_tools) if enabled_tools else None
+    selected_files_list = json.loads(selected_files) if selected_files else None
     
     return StreamingResponse(
         chat_controller.process_chat_stream(
@@ -60,7 +64,8 @@ async def chat_stream_multimodal(
             mcp_server_urls=mcp_urls_list,
             model=model,
             files=images,
-            enabled_tools=enabled_tools_list
+            enabled_tools=enabled_tools_list,
+            selected_files=selected_files_list
         ),
         media_type="text/event-stream"
     )
