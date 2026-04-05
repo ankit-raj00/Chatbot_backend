@@ -1,0 +1,10 @@
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+qdrant_data/
+temp_images_*/
+.pytest_cache/
+debug_parsed_md/
+.env
