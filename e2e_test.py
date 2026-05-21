@@ -193,7 +193,7 @@ def test_chat_basic():
                      json={
                          "message": "Say hello in exactly one sentence.",
                          "conversation_id": state["conversation_id"],
-                         "model": "gemini-2.5-flash-lite-preview-09-2025",
+                         "model": "gemini-2.5-flash-lite",
                          "enabled_tools": [],
                          "selected_files": []
                      }, stream=True, timeout=60)
@@ -217,7 +217,7 @@ def test_chat_with_tool():
                      json={
                          "message": "What is the current time?",
                          "conversation_id": state["conversation_id"],
-                         "model": "gemini-2.5-flash-lite-preview-09-2025",
+                         "model": "gemini-2.5-flash-lite",
                          "enabled_tools": ["get_current_time"],
                          "selected_files": []
                      }, stream=True, timeout=60)

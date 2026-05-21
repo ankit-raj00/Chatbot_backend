@@ -10,8 +10,8 @@ class ModelConfig:
     
     # Available models with their capabilities
     MODELS: Dict[str, Dict[str, Any]] = {
-        "gemini-2.5-flash-lite-preview-09-2025": {
-            "name": "Gemini 2.5 Flash Lite Preview",
+        "gemini-2.5-flash-lite": {
+            "name": "Gemini 2.5 Flash Lite",
             "description": "Fastest, highest quota — primary model for all features",
             "supports_images": True,
             "supports_video": True,
@@ -58,7 +58,7 @@ class ModelConfig:
     }
 
     # Default model — highest quota, lowest latency
-    DEFAULT_MODEL = "gemini-2.5-flash-lite-preview-09-2025"
+    DEFAULT_MODEL = "gemini-2.5-flash-lite"
     
     @classmethod
     def get_model_info(cls, model_id: str) -> Dict[str, Any]:
