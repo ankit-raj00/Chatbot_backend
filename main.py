@@ -111,19 +111,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    import time
-    start_time = time.time()
-    print(f"Incoming request: {request.method} {request.url}")
-    try:
-        response = await call_next(request)
-        process_time = time.time() - start_time
-        print(f"Request completed: {request.method} {request.url} - Status: {response.status_code} - Time: {process_time:.4f}s")
-        return response
-    except Exception as e:
-        print(f"Request failed: {request.method} {request.url} - Error: {str(e)}")
-        raise e
+# ── Pure ASGI logging middleware (avoids BaseHTTPMiddleware anyio conflicts) ──
+class LoggingMiddleware:
+    """
+    Pure ASGI middleware for request logging.
+    Safer than @app.middleware('http') / BaseHTTPMiddleware on Python 3.12+
+    because it doesn't create a coroutine boundary via anyio.create_task_group().
+    """
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        import time
+        request = Request(scope, receive)
+        start_time = time.time()
+        print(f"Incoming request: {request.method} {request.url}")
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                process_time = time.time() - start_time
+                print(
+                    f"Request completed: {request.method} {request.url} "
+                    f"- Status: {message['status']} - Time: {process_time:.4f}s"
+                )
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        except Exception as e:
+            print(f"Request failed: {request.method} {request.url} - Error: {str(e)}")
+            raise
 
 # Include routers
 app.include_router(auth_router)
@@ -138,6 +159,8 @@ app.include_router(user_router)
 app.include_router(upload_router)
 app.include_router(rag_router)
 
+# Attach pure ASGI logging middleware LAST (outermost layer)
+app.add_middleware(LoggingMiddleware)  # type: ignore[arg-type]
 
 @app.get("/")
 async def root():
