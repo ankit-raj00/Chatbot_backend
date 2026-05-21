@@ -5,7 +5,7 @@ Change RAG_MODEL here and it applies everywhere — no need to edit individual n
 
 # ── Model ──────────────────────────────────────────────────────────────────────
 # Used by: GraderNode, AgentNode, GenerationNode, HallucinationNode, LlamaParseClient
-RAG_MODEL = "gemini-2.5-flash-lite"
+RAG_MODEL = "gemini-2.5-flash"
 
 # ── Retrieval ──────────────────────────────────────────────────────────────────
 RETRIEVAL_K = 5          # number of chunks to retrieve per query
