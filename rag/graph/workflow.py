@@ -21,11 +21,7 @@ class RAGWorkflow:
         # Initialize Nodes
         self.retriever = RetrievalNode()
         self.grader = GraderNode()
-        self.retriever = RetrievalNode()
-        self.grader = GraderNode()
         self.agent = AgentNode()
-        self.hallucinator = HallucinationNode()
-        self.web_search = WebSearchNode()
         self.hallucinator = HallucinationNode()
         self.web_search = WebSearchNode()
         

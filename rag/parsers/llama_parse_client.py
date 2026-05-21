@@ -155,14 +155,14 @@ class LlamaParseClient:
             # 7. Save Structured JSON (DocStore) -> MongoDB
             doc_store_id = await self._save_json_doc_store(pages_json, image_map, available_images, file_path)
             
-            # --- DEBUG: Save Final Markdown to Disk ---
-            debug_dir = os.path.join(os.path.dirname(__file__), "debug_parsed_md")
-            os.makedirs(debug_dir, exist_ok=True)
-            debug_path = os.path.join(debug_dir, f"final_{os.path.basename(file_path)}.md")
-            
-            with open(debug_path, "w", encoding="utf-8") as f:
-                f.write(final_markdown)
-            logger.info(f"✅ Final Markdown saved: {debug_path}")
+            # --- DEBUG: Save Final Markdown to Disk (only in dev) ---
+            if os.getenv("DEBUG_PARSING", "false").lower() == "true":
+                debug_dir = os.path.join(os.path.dirname(__file__), "debug_parsed_md")
+                os.makedirs(debug_dir, exist_ok=True)
+                debug_path = os.path.join(debug_dir, f"final_{os.path.basename(file_path)}.md")
+                with open(debug_path, "w", encoding="utf-8") as f:
+                    f.write(final_markdown)
+                logger.info(f"✅ Final Markdown saved: {debug_path}")
             # ------------------------------------------
             
             # 8. Cleanup Temporary Files
