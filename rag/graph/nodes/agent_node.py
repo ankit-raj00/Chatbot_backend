@@ -24,10 +24,10 @@ class AgentNode:
     def __init__(self):
         # 1. Initialize LLM
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash-lite", # Fast, supports tools
+            model="gemini-2.5-flash-lite-preview-09-2025",
             temperature=0,
             google_api_key=os.getenv("GOOGLE_API_KEY"),
-            convert_system_message_to_human=True 
+            convert_system_message_to_human=True
         )
         
         # 2. Bind Tools

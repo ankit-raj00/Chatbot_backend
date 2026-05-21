@@ -83,15 +83,18 @@ class RetrievalNode:
 
         search_kwargs = {"k": 5}
 
-        # ── File-level filtering (needs payload index on metadata.source) ─────
-        selected_files = state.get("selected_files")
-        if selected_files and isinstance(selected_files, list) and len(selected_files) > 0:
-            logger.info(f"   🛡️ File Filter: {selected_files}")
+        # ── File-level filtering by UUID (needs payload index on metadata.file_id) ──
+        # Filtering by file_id (UUID) not filename:
+        #   - Unique per upload even if same filename is re-uploaded
+        #   - Isolated per user — no cross-user leakage
+        selected_file_ids = state.get("selected_file_ids")
+        if selected_file_ids and isinstance(selected_file_ids, list) and len(selected_file_ids) > 0:
+            logger.info(f"   🛡️ File Filter (by UUID): {selected_file_ids}")
             file_filter = models.Filter(
                 must=[
                     models.FieldCondition(
-                        key="metadata.source",      # LangChain stores metadata nested under "metadata"
-                        match=models.MatchAny(any=selected_files)
+                        key="metadata.file_id",      # UUID stored at ingestion time
+                        match=models.MatchAny(any=selected_file_ids)
                     )
                 ]
             )

@@ -26,8 +26,9 @@ class RAGGraphState(TypedDict):
     retry_count: int
     """Counter for general retries (guardrail < 3)."""
 
-    selected_files: Optional[List[str]]
-    """List of file IDs/Names to filter search context."""
+    selected_file_ids: Optional[List[str]]
+    """List of file UUIDs to filter search context. Each UUID maps to a specific
+    uploaded document via metadata.file_id stored in Qdrant."""
 
     messages: List[BaseMessage]
     """Agent scratchpad / conversation history."""

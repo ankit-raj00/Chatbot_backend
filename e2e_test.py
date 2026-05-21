@@ -193,7 +193,7 @@ def test_chat_basic():
                      json={
                          "message": "Say hello in exactly one sentence.",
                          "conversation_id": state["conversation_id"],
-                         "model": "gemini-2.0-flash-lite",
+                         "model": "gemini-2.5-flash-lite-preview-09-2025",
                          "enabled_tools": [],
                          "selected_files": []
                      }, stream=True, timeout=60)
@@ -217,7 +217,7 @@ def test_chat_with_tool():
                      json={
                          "message": "What is the current time?",
                          "conversation_id": state["conversation_id"],
-                         "model": "gemini-2.0-flash-lite",
+                         "model": "gemini-2.5-flash-lite-preview-09-2025",
                          "enabled_tools": ["get_current_time"],
                          "selected_files": []
                      }, stream=True, timeout=60)
@@ -295,23 +295,27 @@ def test_rag_chat():
     for q in questions:
         print(f"\n   Q: {q}")
         r = session.post(f"{BASE_URL}/api/v1/rag/chat",
-                         json={"message": q, "selected_files": None},
-                         timeout=120)
+                         json={"message": q, "selected_file_ids": None},
+                         timeout=180)  # 429 SDK retries can take 30s+
         assert_ok(r, 200, "POST /api/v1/rag/chat")
         body = r.json()
         answer = body.get("answer", "")
         print(f"   A: {answer[:200]}...")
         print(f"   Sources: {body.get('sources')} | Hallucination: {body.get('hallucination_warning')}")
         assert len(answer) > 10, f"Answer too short: '{answer}'"
-        time.sleep(1)
+        time.sleep(5)  # let rate-limit quota replenish between questions
+
 
 def test_rag_chat_file_filter():
     if not state["ingested_file"]:
         print("   ⚠️  Skipping — no ingested_file")
         return
     r = session.post(f"{BASE_URL}/api/v1/rag/chat",
-                     json={"message": "Summarize the document", "selected_files": [state["ingested_file"]]},
-                     timeout=120)
+                     json={
+                         "message": "Summarize the document",
+                         "selected_file_ids": [state["ingested_file"]]
+                     },
+                     timeout=180)
     assert_ok(r, 200, "POST /api/v1/rag/chat [filter]")
     body = r.json()
     print(f"   Filtered answer: {body.get('answer','')[:200]}...")
@@ -338,8 +342,8 @@ def test_read_page():
 #  20 — TOOLS
 # ══════════════════════════════════════════════
 def test_list_tools():
-    r = session.get(f"{BASE_URL}/tools", timeout=15)
-    assert_ok(r, 200, "GET /tools")
+    r = session.get(f"{BASE_URL}/api/tools", timeout=15)  # correct prefix
+    assert_ok(r, 200, "GET /api/tools")
     print(f"   {str(r.json())[:200]}")
 
 
@@ -397,8 +401,8 @@ if __name__ == "__main__":
     run("18. RAG Chat (file filter)",       test_rag_chat_file_filter)
     run("19. RAG Read Page (DocStore)",     test_read_page)
     run("20. List Tools",                   test_list_tools)
-    run("21. Logout",                       test_logout)
-    run("22. Delete Conversation",          test_delete_conversation)
+    run("21. Delete Conversation",           test_delete_conversation)  # cleanup before logout
+    run("22. Logout",                        test_logout)
 
     print(f"\n{'═'*60}")
     print(f"{BOLD}  RESULTS{RESET}")

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 class ChatRequest(BaseModel):
     message: str
-    selected_files: Optional[List[str]] = None
+    selected_file_ids: Optional[List[str]] = None  # list of UUID file_ids, not filenames
 
 class PageReadRequest(BaseModel):
     doc_id: str
@@ -44,7 +44,7 @@ async def chat_endpoint(request: ChatRequest):
             "question": request.message,
             "retry_count": 0,
             "hallucination_count": 0,
-            "selected_files": request.selected_files # Pass filters to the graph
+            "selected_file_ids": request.selected_file_ids  # UUIDs for Qdrant filter
         }
         
         # Invoke Graph

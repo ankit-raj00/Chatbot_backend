@@ -78,10 +78,17 @@ class IngestionService:
             docs = await self.parser.parse(temp_path, route_config["parser_config"])
             logger.info(f"   ✅ Parsed {len(docs)} raw documents.")
             
-            # CRITICAL: Overwrite 'source' metadata with original filename
-            # The parser uses the temp path, which is ugly and ephemeral.
+            # CRITICAL: Generate a stable UUID for this upload.
+            # Use this as the filter key — NOT the filename, which can clash
+            # across users or repeated uploads of the same file.
+            file_id = str(uuid.uuid4())
+
+            # Tag every chunk with:
+            #   metadata.source  → original filename (for display)
+            #   metadata.file_id → UUID (for Qdrant filtering)
             for doc in docs:
-                doc.metadata["source"] = file.filename
+                doc.metadata["source"]  = file.filename  # display label
+                doc.metadata["file_id"] = file_id        # filter key
             
             # 4. Splitting & Indexing (Brain & Memory) 🧠 + 💾
             logger.info("   🔪 Splitting & Indexing...")
@@ -95,9 +102,10 @@ class IngestionService:
             
             return {
                 "status": "success",
-                "filename": file.filename,
+                "file_id": file_id,          # UUID — use this for filtering
+                "filename": file.filename,   # original name — for display only
                 "strategy": route_config,
-                "chunks_processed": "dynamic" # TODO: Return actual count
+                "chunks_processed": "dynamic"
             }
             
         except Exception as e:

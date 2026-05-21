@@ -100,11 +100,15 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        # Local dev
         "http://localhost:3000",
         "http://localhost:5173",
+        # Vercel deployments
         "https://chatbot-backend-beta-nine.vercel.app",
-        "https://chatbot-khaki-eta-53.vercel.app"
-        
+        "https://chatbot-khaki-eta-53.vercel.app",
+        "https://chatbot-ankit-raj00s-projects.vercel.app",
+        # Custom domain
+        "https://agentx.ankitrajai.in",
     ],
     allow_credentials=True,
     allow_methods=["*"],

@@ -203,7 +203,7 @@ class LlamaParseClient:
             "Do not speculate or infer hidden meaning."
         )
         response = self.genai_client.models.generate_content(
-            model="gemini-2.0-flash-lite",
+            model="gemini-2.5-flash-lite-preview-09-2025",
             contents=[prompt, img]
         )
         return response.text.strip()
