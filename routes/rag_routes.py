@@ -36,8 +36,9 @@ async def chat_endpoint(request: ChatRequest):
     """
     try:
         logger.info(f"Received RAG query: {request.message}")
-        if request.selected_files:
-            logger.info(f"Context Filters detected: {len(request.selected_files)} files")
+        if request.selected_file_ids:
+            logger.info(f"Context Filters detected: {len(request.selected_file_ids)} files")
+
         
         # Initial State
         inputs = {

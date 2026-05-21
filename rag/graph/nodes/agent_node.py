@@ -1,11 +1,9 @@
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.tools import tool
-from langgraph.prebuilt import create_react_agent # This is still correct in modern LangGraph, the warning might be based on older langchain-agents move.
-# However, if I want to be safe and use exactly what the warning said:
-# from langchain.agents import create_agent 
-# BUT LangGraph's prebuilt is what we want for this flow.
+from langgraph.prebuilt import create_react_agent
 import langgraph.prebuilt as prebuilt
+from config.rag_config import RAG_MODEL
 from rag.graph.state import RAGGraphState
 from rag.tools.retrieval_tool import search_knowledge_base
 from rag.tools.doc_store_tools import read_document_page
@@ -24,7 +22,7 @@ class AgentNode:
     def __init__(self):
         # 1. Initialize LLM
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash-lite-preview-09-2025",
+            model=RAG_MODEL,
             temperature=0,
             google_api_key=os.getenv("GOOGLE_API_KEY"),
             convert_system_message_to_human=True
