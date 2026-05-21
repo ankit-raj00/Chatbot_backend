@@ -162,7 +162,7 @@ app.include_router(rag_router)
 # Attach pure ASGI logging middleware LAST (outermost layer)
 app.add_middleware(LoggingMiddleware)  # type: ignore[arg-type]
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     """Root endpoint"""
     return {
