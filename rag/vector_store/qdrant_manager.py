@@ -36,8 +36,9 @@ class QdrantManager:
         self.api_key = os.getenv("QDRANT_API_KEY")
         self.collection_name = os.getenv("QDRANT_COLLECTION", "agentic_rag_v1")
         self.embedding_model = GoogleGenerativeAIEmbeddings(
-            model="models/text-embedding-004",
-            google_api_key=os.getenv("GOOGLE_API_KEY")
+            model="models/gemini-embedding-001",
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+            output_dimensionality=768  # MRL truncation keeps dim=768, matching Qdrant collection
         )
 
         # --- Connection Strategy ---
@@ -89,7 +90,7 @@ class QdrantManager:
     def ensure_collection(self):
         """
         Idempotent: Creates the collection if it doesn't exist.
-        Dimension: 768 (text-embedding-004), Distance: Cosine
+        Dimension: 768 (gemini-embedding-001 + MRL output_dimensionality=768), Distance: Cosine
         """
         try:
             collections = self.client.get_collections()

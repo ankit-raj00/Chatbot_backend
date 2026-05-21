@@ -15,10 +15,11 @@ async def debug_retrieval_flow():
         print("❌ GOOGLE_API_KEY missing!")
         return
 
-    print("1. Initializing Embeddings (models/text-embedding-004)...")
+    print("1. Initializing Embeddings (models/gemini-embedding-001)...")
     embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/text-embedding-004",
-        google_api_key=api_key
+        model="models/gemini-embedding-001",
+        google_api_key=os.getenv("GOOGLE_API_KEY"),
+        output_dimensionality=768
     )
     
     # 2. Embed Query

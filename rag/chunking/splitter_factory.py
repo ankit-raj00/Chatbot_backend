@@ -68,8 +68,9 @@ class SplitterFactory:
                 return RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
                 
             embeddings = GoogleGenerativeAIEmbeddings(
-                model="models/text-embedding-004",
-                google_api_key=os.getenv("GOOGLE_API_KEY")
+                model="models/gemini-embedding-001",
+                google_api_key=os.getenv("GOOGLE_API_KEY"),
+                output_dimensionality=768
             )
             
             # Guardrail C: Hard Chunk Caps
