@@ -24,7 +24,6 @@ from routes.mcp_server_routes import router as mcp_server_router
 from routes.oauth_routes import router as oauth_router
 from routes.tool_routes import router as tool_router
 from routes.auth_status_routes import router as auth_status_router
-from routes.auth_status_routes import router as auth_status_router
 from routes.user_routes import router as user_router
 from routes.upload_routes import router as upload_router
 from routes.rag_routes import router as rag_router
@@ -134,7 +133,6 @@ app.include_router(chat_router)
 app.include_router(mcp_server_router)
 app.include_router(oauth_router)
 app.include_router(tool_router)
-app.include_router(auth_status_router)
 app.include_router(auth_status_router)
 app.include_router(user_router)
 app.include_router(upload_router)
