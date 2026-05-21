@@ -38,7 +38,8 @@ class QdrantManager:
         self.embedding_model = GoogleGenerativeAIEmbeddings(
             model="models/gemini-embedding-001",
             google_api_key=os.getenv("GOOGLE_API_KEY"),
-            output_dimensionality=768  # MRL truncation keeps dim=768, matching Qdrant collection
+            output_dimensionality=768,  # MRL truncation keeps dim=768, matching Qdrant collection
+            max_retries=6,              # Built-in SDK retry for 429 RESOURCE_EXHAUSTED
         )
 
         # --- Connection Strategy ---
@@ -89,8 +90,12 @@ class QdrantManager:
 
     def ensure_collection(self):
         """
-        Idempotent: Creates the collection if it doesn't exist.
-        Dimension: 768 (gemini-embedding-001 + MRL output_dimensionality=768), Distance: Cosine
+        Idempotent: Creates the collection if it doesn't exist, then
+        ensures the payload index on 'metadata.source' exists.
+
+        Qdrant Cloud REQUIRES explicit payload indexes for filtered search.
+        Without this index, any search with a filter on metadata.source
+        returns: 400 "Index required but not found for metadata.source".
         """
         try:
             collections = self.client.get_collections()
@@ -108,6 +113,24 @@ class QdrantManager:
                 logger.info(f"✅ Collection '{self.collection_name}' created.")
             else:
                 logger.info(f"✅ Collection '{self.collection_name}' already exists.")
+
+            # ── Payload index on metadata.source (required for Qdrant Cloud filters) ──
+            # create_payload_index is idempotent — safe to call even if index exists.
+            try:
+                self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name="metadata.source",
+                    field_schema=models.PayloadSchemaType.KEYWORD,
+                )
+                logger.info("🔑 Payload index on 'metadata.source' ensured.")
+            except Exception as idx_err:
+                # If index already exists Qdrant raises an error we can safely ignore.
+                # We check the message to avoid swallowing real errors.
+                err_msg = str(idx_err).lower()
+                if "already exists" in err_msg or "index already" in err_msg:
+                    logger.info("🔑 Payload index 'metadata.source' already exists.")
+                else:
+                    logger.warning(f"⚠️  Could not create payload index: {idx_err}")
 
         except Exception as e:
             logger.error(f"❌ ensure_collection failed: {e}")
