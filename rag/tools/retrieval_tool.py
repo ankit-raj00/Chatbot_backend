@@ -44,13 +44,13 @@ def search_knowledge_base(
                               # Let's use QdrantClient directly for maximum control over offset.
         }
         
-        # Construct Filter
+        # Construct Filter by file_id UUID
         qdrant_filter = None
         if selected_files:
              qdrant_filter = models.Filter(
                 must=[
                     models.FieldCondition(
-                        key="metadata.source", 
+                        key="metadata.file_id",   # UUID — not filename
                         match=models.MatchAny(any=selected_files)
                     )
                 ]

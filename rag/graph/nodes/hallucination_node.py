@@ -21,7 +21,7 @@ class HallucinationNode:
     
     def __init__(self):
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash-lite",
+            model="gemini-2.5-flash-lite-preview-09-2025",
             temperature=0,
             google_api_key=os.getenv("GOOGLE_API_KEY")
         )

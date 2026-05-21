@@ -114,23 +114,23 @@ class QdrantManager:
             else:
                 logger.info(f"✅ Collection '{self.collection_name}' already exists.")
 
-            # ── Payload index on metadata.source (required for Qdrant Cloud filters) ──
-            # create_payload_index is idempotent — safe to call even if index exists.
-            try:
-                self.client.create_payload_index(
-                    collection_name=self.collection_name,
-                    field_name="metadata.source",
-                    field_schema=models.PayloadSchemaType.KEYWORD,
-                )
-                logger.info("🔑 Payload index on 'metadata.source' ensured.")
-            except Exception as idx_err:
-                # If index already exists Qdrant raises an error we can safely ignore.
-                # We check the message to avoid swallowing real errors.
-                err_msg = str(idx_err).lower()
-                if "already exists" in err_msg or "index already" in err_msg:
-                    logger.info("🔑 Payload index 'metadata.source' already exists.")
-                else:
-                    logger.warning(f"⚠️  Could not create payload index: {idx_err}")
+            # ── Payload indexes (required for Qdrant Cloud filtered search) ────────
+            # create_payload_index is idempotent — safe to call on every startup.
+            for field in ("metadata.source", "metadata.file_id"):
+                try:
+                    self.client.create_payload_index(
+                        collection_name=self.collection_name,
+                        field_name=field,
+                        field_schema=models.PayloadSchemaType.KEYWORD,
+                    )
+                    logger.info(f"🔑 Payload index '{field}' ensured.")
+                except Exception as idx_err:
+                    err_msg = str(idx_err).lower()
+                    if "already exists" in err_msg or "index already" in err_msg:
+                        logger.info(f"🔑 Payload index '{field}' already exists.")
+                    else:
+                        logger.warning(f"⚠️  Could not create payload index '{field}': {idx_err}")
+
 
         except Exception as e:
             logger.error(f"❌ ensure_collection failed: {e}")
@@ -138,34 +138,46 @@ class QdrantManager:
 
     def list_unique_sources(self) -> list:
         """
-        Scans up to 1000 points and returns unique source filenames.
+        Scans up to 1000 points and returns unique files as:
+            [{"file_id": "<uuid>", "filename": "<original name>"}, ...]
+
+        Returns file_id (for filtering) + filename (for display).
+        Falls back to filename-only if file_id is not present on older chunks.
         """
         try:
             self.ensure_collection()
             points, _ = self.client.scroll(
                 collection_name=self.collection_name,
                 limit=1000,
-                with_payload=["source", "metadata"],
+                with_payload=["metadata"],
                 with_vectors=False
             )
-            sources = set()
+            # Use dict keyed by file_id to deduplicate
+            seen: dict = {}   # file_id → filename
             for point in points:
                 if not point.payload:
                     continue
-                # LangChain stores metadata nested under "metadata" key
-                if "metadata" in point.payload and isinstance(point.payload["metadata"], dict):
-                    src = point.payload["metadata"].get("source")
-                    if src:
-                        sources.add(src)
-                elif "source" in point.payload:
-                    sources.add(point.payload["source"])
+                meta = point.payload.get("metadata", {})
+                if not isinstance(meta, dict):
+                    continue
+                file_id  = meta.get("file_id")
+                filename = meta.get("source", "unknown")
+                if file_id:
+                    seen[file_id] = filename        # prefer UUID key
+                elif filename and filename not in seen:
+                    seen[filename] = filename       # legacy fallback (no file_id)
 
-            logger.info(f"📂 Found {len(sources)} unique sources in Qdrant.")
-            return list(sources)
+            files = [
+                {"file_id": fid, "filename": fname}
+                for fid, fname in seen.items()
+            ]
+            logger.info(f"📂 Found {len(files)} unique files in Qdrant.")
+            return files
 
         except Exception as e:
             logger.error(f"Failed to list sources: {e}")
             return []
+
 
     def get_vector_store(self) -> QdrantVectorStore:
         """Returns the LangChain QdrantVectorStore wrapper."""

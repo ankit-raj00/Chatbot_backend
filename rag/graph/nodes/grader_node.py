@@ -1,79 +1,91 @@
 import logging
 import os
-from typing import List
-from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
-from pydantic import BaseModel, Field
 
 from rag.graph.state import RAGGraphState
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Structured Output Schema ---
-class GradeResult(BaseModel):
-    """Binary score for relevance check."""
-    binary_score: str = Field(description="Relevance score 'yes' or 'no'")
 
 class GraderNode:
     """
-    The 'Grader' node filtering retrieval noise.
-    Implements Defense #6: Prevents garbage-in to Generator.
+    Grades retrieved documents for relevance.
+
+    KEY CHANGE: All k docs are graded in ONE batched LLM call.
+    Before: k=5 docs → 5 sequential LLM calls → 429 cascade
+    After:  k=5 docs → 1 LLM call → 5x fewer API hits
     """
-    
+
     def __init__(self):
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash-lite", # Fast & Cheap for grading
+        self.llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash-lite-preview-09-2025",
             temperature=0,
             google_api_key=os.getenv("GOOGLE_API_KEY")
         )
-        self.structured_llm = llm.with_structured_output(GradeResult)
-        
-        # System Prompt
-        self.system_prompt = """You are a grader assessing relevance of a retrieved document to a user question. \n 
-        If the document contains keyword(s) or semantic meaning related to the user question, grade it as relevant. \n
-        It does not need to be a stringent test. The goal is to filter out erroneous retrievals. \n
-        Give a binary score 'yes' or 'no' score to indicate whether the document is relevant to the question."""
-        
+
+        # Single prompt grades ALL chunks at once
+        self.system_prompt = (
+            "You are a relevance grader. Given a user question and a numbered list "
+            "of retrieved document chunks, decide which are relevant.\n"
+            "Respond with ONLY a comma-separated list of 'yes' or 'no', one per chunk, in order.\n"
+            "Example for 3 chunks: yes,no,yes\n"
+            "Do NOT include any other text."
+        )
+
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", self.system_prompt),
-            ("human", "Retrieved document: \n\n {document} \n\n User question: {question}"),
+            ("human", "Question: {question}\n\nChunks:\n{chunks}"),
         ])
-        
-        self.chain = self.prompt | self.structured_llm
 
     def grade_documents(self, state: RAGGraphState) -> RAGGraphState:
         """
-        Determines whether the retrieved documents are relevant to the question.
-        Filters out irrelevant documents. 
+        Grades all retrieved documents in a SINGLE LLM call.
+
+        API calls per question:
+          Before refactor: k grader calls + 1 generate + 1 hallucination = k+2
+          After refactor:  1 grader call  + 1 generate + 1 hallucination = 3
+          For k=5: 7 → 3 calls  (57% reduction → far fewer 429s)
         """
-        question = state["question"]
+        question  = state["question"]
         documents = state["documents"]
-        
-        filtered_docs = []
-        web_search = False
-        
-        for d in documents:
-            try:
-                score = self.chain.invoke({"question": question, "document": d.page_content})
-                grade = score.binary_score
-                
+
+        if not documents:
+            logger.warning("No documents to grade → web search needed.")
+            return {**state, "documents": [], "web_search_needed": True}
+
+        try:
+            # Pack all chunks into one prompt (cap each at 500 chars to avoid token bloat)
+            chunks_text = "\n\n".join(
+                f"[{i+1}] {doc.page_content[:500]}"
+                for i, doc in enumerate(documents)
+            )
+
+            response = (self.prompt | self.llm).invoke({
+                "question": question,
+                "chunks": chunks_text
+            })
+            raw    = response.content.strip().lower()
+            grades = [g.strip() for g in raw.split(",")]
+
+            filtered_docs = []
+            for i, doc in enumerate(documents):
+                grade = grades[i] if i < len(grades) else "yes"  # fail-open on parse error
                 if grade == "yes":
-                    logger.info(f"Document relevant: {d.metadata.get('source', 'unknown')}")
-                    filtered_docs.append(d)
+                    logger.info(f"   ✅ Doc [{i+1}] relevant")
+                    filtered_docs.append(doc)
                 else:
-                    logger.info(f"Document filtered out: {d.metadata.get('source', 'unknown')}")
-                    continue
-            except Exception as e:
-                logger.warning(f"Grading failed for doc, keeping it safe: {str(e)}")
-                filtered_docs.append(d) # Fail open (keep doc) on error
-                
-        # If no documents are left, we need web search
-        if not filtered_docs:
-            logger.warning("No relevant documents found. Web search needed.")
-            web_search = True
-            
+                    logger.info(f"   ❌ Doc [{i+1}] filtered out")
+
+        except Exception as e:
+            logger.warning(f"Batch grading failed ({e}) — keeping all docs (fail-open)")
+            filtered_docs = documents  # fail open on any error
+
+        web_search = len(filtered_docs) == 0
+        if web_search:
+            logger.warning("No relevant docs after grading → web search needed.")
+
         return {
             **state,
             "documents": filtered_docs,

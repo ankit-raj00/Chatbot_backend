@@ -57,13 +57,13 @@ class RAGWorkflow:
         # Agent -> Hallucination Check
         self.workflow.add_edge("agent", "hallucination_check")
         
-        # Conditional Edge: Hallucination Check -> (End OR Retry Loop)
+        # Conditional Edge: Hallucination Check → End
+        # Note: retry loop removed — see _decide_to_retry for rationale.
         self.workflow.add_conditional_edges(
             "hallucination_check",
             self._decide_to_retry,
             {
                 "end": END,
-                "retry": "agent", # Simple retry. For full loop: "retrieve"
             },
         )
 
@@ -83,30 +83,26 @@ class RAGWorkflow:
     def _decide_to_retry(self, state: RAGGraphState):
         """
         Determines whether to retry based on hallucination check.
-        Implements Defense #5: Max Retry Policy < 3.
+
+        DECISION: Always END — never retry.
+        Reason: Retrying calls gemini-2.0-flash-lite again immediately, which:
+          1. Hits 429 rate limits (cascading SDK retries = 1+2+4+8+16s per call)
+          2. Multiplies total latency by retry_count (up to 3x)
+          3. Causes 120s+ response times → client timeout
+
+        Instead we return the best available answer with a hallucination_warning flag.
+        The API response already includes `hallucination_warning` for the frontend to display.
         """
         hallucination_count = state.get("hallucination_count", 0)
-        retry_count = state.get("retry_count", 0)
-        
+
         if hallucination_count == 0:
-            logger.info("Decision: END (Verified)")
-            return "end"
-            
-        if retry_count < 3:
-            logger.warning(f"Decision: RETRY (Count: {retry_count})")
-            # Increment retry count in state is handled by passing new state in node return,
-            # but wait, conditional edges don't modify state. 
-            # We must modify state in the NODE.
-            # Correction: HallucinationNode should increment the count.
-            # Assuming HallucinationNode incremented `hallucination_count` on failure.
-            # We don't have a specific `retry_count` incrementer here without a separate node 
-            # or modifying Graph state in edge (impossible).
-            # For V1, we rely on hallucination_count acting as proxy or loop limit.
-            # Let's check HallucinationNode implementation... it returns state with updated count.
-            return "retry"
+            logger.info("Decision: END (Verified ✅)")
         else:
-            logger.warning("Decision: END (Max Retries Exceeded)")
-            return "end"
+            logger.warning(
+                "Decision: END (Hallucination detected — returning best answer with warning)"
+            )
+        return "end"
+
             
     def get_app(self):
         return self.app
