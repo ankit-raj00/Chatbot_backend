@@ -2,12 +2,10 @@ import os
 import shutil
 import logging
 import json
-import json
 import asyncio
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-import nest_asyncio
-from dotenv import load_dotenv
+
 
 # Parsing Libraries
 from llama_parse import LlamaParse
@@ -19,9 +17,7 @@ from PIL import Image
 from utils.cloudinary_handler import CloudinaryHandler
 from core.database import doc_store_collection
 from models.doc_store import ParsedDocument, PageContent, ImageSummary
-
-# Apply nest_asyncio
-nest_asyncio.apply()
+from dotenv import load_dotenv
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -72,6 +68,11 @@ class LlamaParseClient:
     async def parse(self, file_path: str, config: Dict[str, Any]) -> List[Document]:
         if not self.api_key:
             return self._fallback_unstructured(file_path)
+
+        # Apply nest_asyncio lazily here (not at module level) to avoid
+        # breaking anyio's event loop detection used by FastAPI middleware.
+        import nest_asyncio
+        nest_asyncio.apply()
 
         try:
             logger.info(f"🚀 Starting Advanced Parsing for: {os.path.basename(file_path)}")
