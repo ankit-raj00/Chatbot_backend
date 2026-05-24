@@ -50,6 +50,10 @@ async def native_tool_node(state: ChatState, config: RunnableConfig) -> Dict[str
                 exec_args = tool_args.copy()
                 if "user_id" in sig.parameters and user_id:
                      exec_args["user_id"] = user_id
+                     
+                selected_files = state.get("selected_files")
+                if "selected_files" in sig.parameters and selected_files is not None:
+                     exec_args["selected_files"] = selected_files
                 
                 # 3. Execute
                 if tool_instance.coroutine:

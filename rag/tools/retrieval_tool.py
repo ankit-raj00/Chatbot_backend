@@ -15,7 +15,8 @@ def search_knowledge_base(
     query: str, 
     selected_files: Optional[List[str]] = None,
     limit: int = 5,
-    offset: int = 0
+    offset: int = 0,
+    user_id: str = None
 ) -> List[Dict[str, Any]]:
     """
     Agent Tool: Searches the knowledge base (Vector DB) for relevant context.
@@ -26,12 +27,13 @@ def search_knowledge_base(
                                               If empty or None, searches all files (unless enforced upstream).
         limit (int): Number of chunks to return (default: 5).
         offset (int): Pagination offset (default: 0).
+        user_id (str, optional): The user ID to restrict the search to.
         
     Returns:
         List[Dict]: A list of chunks with 'content', 'source', 'score', and 'id'.
     """
     try:
-        logger.info(f"🛠️ Tool Call: search_knowledge_base(query='{query}', files={selected_files}, limit={limit}, offset={offset})")
+        logger.info(f"🛠️ Tool Call: search_knowledge_base(query='{query}', files={selected_files}, limit={limit}, offset={offset}, user_id={user_id})")
         
         vector_store = qdrant_manager.get_vector_store()
         
@@ -44,17 +46,27 @@ def search_knowledge_base(
                               # Let's use QdrantClient directly for maximum control over offset.
         }
         
-        # Construct Filter by file_id UUID
-        qdrant_filter = None
-        if selected_files:
-             qdrant_filter = models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="metadata.file_id",   # UUID — not filename
-                        match=models.MatchAny(any=selected_files)
-                    )
-                ]
+        # Construct Filter by user_id and file_id UUID
+        must_conditions = []
+        if user_id:
+            must_conditions.append(
+                models.FieldCondition(
+                    key="metadata.user_id",
+                    match=models.MatchValue(value=user_id)
+                )
             )
+            
+        if selected_files:
+             must_conditions.append(
+                models.FieldCondition(
+                    key="metadata.file_id",   # UUID — not filename
+                    match=models.MatchAny(any=selected_files)
+                )
+            )
+            
+        qdrant_filter = None
+        if must_conditions:
+            qdrant_filter = models.Filter(must=must_conditions)
 
         # Search using LangChain Wrapper (Safer & Compatible)
         # Note: We pass the filter if it exists
