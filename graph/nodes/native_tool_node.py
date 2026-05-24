@@ -29,6 +29,19 @@ async def native_tool_node(state: ChatState, config: RunnableConfig) -> Dict[str
             # Skip MCP tools (handled by mcp_tool_node)
             continue
             
+        # 0.5. Check Permissions: Ensure the tool is explicitly enabled by the user
+        configuration = config.get("configurable", {})
+        enabled_tool_names = configuration.get("enabled_tools", [])
+        
+        if tool_name not in enabled_tool_names:
+            results.append(ToolMessage(
+                content=f"Error: Tool '{tool_name}' is not enabled. The user has not granted permission in Settings.",
+                name=tool_name,
+                tool_call_id=tool_call_id,
+                status="error"
+            ))
+            continue
+            
         # 1. Get Tool Instance
         tool_instance = get_tool(tool_name)
         
