@@ -8,10 +8,22 @@ router = APIRouter(prefix="/oauth", tags=["OAuth"])
 
 @router.get("/google/authorize")
 async def initiate_google_oauth(
-    redirect_uri: str = Query(..., description="OAuth redirect URI"),
     current_user: dict = Depends(get_current_user)
 ):
     """Initiate Google OAuth flow for Drive access"""
+    import os
+    
+    # Get backend URL for callback
+    backend_url = os.getenv("BACKEND_URL")
+    if not backend_url:
+        vercel_url = os.getenv("VERCEL_URL")
+        if vercel_url:
+            backend_url = f"https://chatbot-backend-beta-nine.vercel.app"
+        else:
+            backend_url = "http://localhost:8000"
+            
+    redirect_uri = f"{backend_url}/oauth/google/callback"
+    
     result = await GoogleOAuthController.initiate_oauth(
         user_id=str(current_user["_id"]),
         redirect_uri=redirect_uri
@@ -34,7 +46,7 @@ async def google_oauth_callback(
         if vercel_url:
             backend_url = f"https://chatbot-backend-beta-nine.vercel.app"
         else:
-            backend_url = "https://chatbot-backend-beta-nine.vercel.app"
+            backend_url = "http://localhost:8000"
             
     redirect_uri = f"{backend_url}/oauth/google/callback"
     
