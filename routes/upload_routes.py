@@ -24,7 +24,7 @@ async def upload_file(
     Manual override available via document_type.
     """
     try:
-        user_id = current_user.get("uid")
+        user_id = str(current_user.get("_id"))
         logger.info(f"Received upload request for: {file.filename} (Type: {document_type}, User: {user_id})")
         
         # Delegate to the Engine

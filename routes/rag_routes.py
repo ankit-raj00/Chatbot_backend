@@ -126,7 +126,7 @@ async def list_files(current_user: dict = Depends(get_current_user)):
         # Since QdrantManager is a Singleton now, we can just instantiate it.
         from rag.vector_store.qdrant_manager import QdrantManager
         manager = QdrantManager()
-        user_id = current_user.get("uid")
+        user_id = str(current_user.get("_id"))
         sources = manager.list_unique_sources(user_id=user_id)
         return {"files": sources}
     except Exception as e:
