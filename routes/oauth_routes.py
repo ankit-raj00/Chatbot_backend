@@ -14,13 +14,8 @@ async def initiate_google_oauth(
     import os
     
     # Get backend URL for callback
-    backend_url = os.getenv("BACKEND_URL")
-    if not backend_url:
-        vercel_url = os.getenv("VERCEL_URL")
-        if vercel_url:
-            backend_url = f"https://chatbot-backend-beta-nine.vercel.app"
-        else:
-            backend_url = "http://localhost:8000"
+    # Uses env var in prod, defaults to localhost in dev
+    backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
             
     redirect_uri = f"{backend_url}/oauth/google/callback"
     
@@ -39,14 +34,7 @@ async def google_oauth_callback(
     import os
     
     # Get backend URL for callback (prod) or default to localhost (dev)
-    # Vercel provides VERCEL_URL, but it doesn't include https://
-    backend_url = os.getenv("BACKEND_URL")
-    if not backend_url:
-        vercel_url = os.getenv("VERCEL_URL")
-        if vercel_url:
-            backend_url = f"https://chatbot-backend-beta-nine.vercel.app"
-        else:
-            backend_url = "http://localhost:8000"
+    backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
             
     redirect_uri = f"{backend_url}/oauth/google/callback"
     
