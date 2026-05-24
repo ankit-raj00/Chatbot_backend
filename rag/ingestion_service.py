@@ -41,12 +41,13 @@ class IngestionService:
         # Note: In Prod, use RedisStore or similar for persistence.
         self.parent_store = InMemoryStore()
 
-    async def process_upload(self, file: UploadFile, document_type: str = "Auto (Detect)") -> Dict[str, Any]:
+    async def process_upload(self, file: UploadFile, document_type: str = "Auto (Detect)", user_id: str = None) -> Dict[str, Any]:
         """
         Main entry point for file ingestion.
         Args:
             file: The uploaded file object
             document_type: Manual category override (optional)
+            user_id: The ID of the user uploading the file (for isolation)
         """
         temp_path = ""
         try:
@@ -86,9 +87,12 @@ class IngestionService:
             # Tag every chunk with:
             #   metadata.source  → original filename (for display)
             #   metadata.file_id → UUID (for Qdrant filtering)
+            #   metadata.user_id → User ID (for user isolation)
             for doc in docs:
                 doc.metadata["source"]  = file.filename  # display label
                 doc.metadata["file_id"] = file_id        # filter key
+                if user_id:
+                    doc.metadata["user_id"] = user_id    # isolate to user
             
             # 4. Splitting & Indexing (Brain & Memory) 🧠 + 💾
             logger.info("   🔪 Splitting & Indexing...")

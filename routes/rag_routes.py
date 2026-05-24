@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException, Body
+from fastapi import APIRouter, HTTPException, Body, Depends
 from pydantic import BaseModel
 from rag.graph.workflow import RAGWorkflow
 import logging
 from typing import List, Optional
 from rag.tools.doc_store_tools import read_document_page
+from core.middleware import get_current_user
 
 # Define Router
 router = APIRouter(prefix="/api/v1/rag", tags=["Agentic RAG"])
@@ -111,9 +112,9 @@ async def retrieve_only(request: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/files")
-async def list_files():
+async def list_files(current_user: dict = Depends(get_current_user)):
     """
-    Lists unique source files currently in the Vector DB.
+    Lists unique source files currently in the Vector DB for the current user.
     """
     try:
         # We need access to QdrantManager. 
@@ -125,7 +126,8 @@ async def list_files():
         # Since QdrantManager is a Singleton now, we can just instantiate it.
         from rag.vector_store.qdrant_manager import QdrantManager
         manager = QdrantManager()
-        sources = manager.list_unique_sources()
+        user_id = current_user.get("uid")
+        sources = manager.list_unique_sources(user_id=user_id)
         return {"files": sources}
     except Exception as e:
         logger.error(f"List files failed: {str(e)}")

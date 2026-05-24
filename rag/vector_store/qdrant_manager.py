@@ -116,7 +116,7 @@ class QdrantManager:
 
             # ── Payload indexes (required for Qdrant Cloud filtered search) ────────
             # create_payload_index is idempotent — safe to call on every startup.
-            for field in ("metadata.source", "metadata.file_id"):
+            for field in ("metadata.source", "metadata.file_id", "metadata.user_id"):
                 try:
                     self.client.create_payload_index(
                         collection_name=self.collection_name,
@@ -136,7 +136,7 @@ class QdrantManager:
             logger.error(f"❌ ensure_collection failed: {e}")
             raise
 
-    def list_unique_sources(self) -> list:
+    def list_unique_sources(self, user_id: str = None) -> list:
         """
         Scans up to 1000 points and returns unique files as:
             [{"file_id": "<uuid>", "filename": "<original name>"}, ...]
@@ -146,11 +146,24 @@ class QdrantManager:
         """
         try:
             self.ensure_collection()
+            
+            scroll_filter = None
+            if user_id:
+                scroll_filter = models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="metadata.user_id",
+                            match=models.MatchValue(value=user_id)
+                        )
+                    ]
+                )
+
             points, _ = self.client.scroll(
                 collection_name=self.collection_name,
                 limit=1000,
                 with_payload=["metadata"],
-                with_vectors=False
+                with_vectors=False,
+                scroll_filter=scroll_filter
             )
             # Use dict keyed by file_id to deduplicate
             seen: dict = {}   # file_id → filename

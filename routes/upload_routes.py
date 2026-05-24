@@ -1,4 +1,5 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from core.middleware import get_current_user
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 from rag.ingestion_service import IngestionService
 import logging
 
@@ -14,7 +15,8 @@ logger = logging.getLogger(__name__)
 @router.post("/upload")
 async def upload_file(
     file: UploadFile = File(...),
-    document_type: str = Form("Auto (Detect)")
+    document_type: str = Form("Auto (Detect)"),
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Uploads a file for Agentic RAG Ingestion.
@@ -22,10 +24,11 @@ async def upload_file(
     Manual override available via document_type.
     """
     try:
-        logger.info(f"Received upload request for: {file.filename} (Type: {document_type})")
+        user_id = current_user.get("uid")
+        logger.info(f"Received upload request for: {file.filename} (Type: {document_type}, User: {user_id})")
         
         # Delegate to the Engine
-        result = await ingestion_service.process_upload(file, document_type)
+        result = await ingestion_service.process_upload(file, document_type, user_id=user_id)
         
         return {
             "message": "Ingestion successful",
