@@ -19,7 +19,8 @@ class GoogleOAuthController:
         'openid'
     ]
     # In production, these should be env vars, but for now we'll load from client_secrets.json
-    CLIENT_SECRETS_FILE = "client_secrets.json"
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    CLIENT_SECRETS_FILE = os.path.join(BASE_DIR, "client_secrets.json")
     
     @staticmethod
     def _get_flow(redirect_uri: str):
