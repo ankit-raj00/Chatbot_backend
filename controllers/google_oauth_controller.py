@@ -72,6 +72,18 @@ class GoogleOAuthController:
                 state=user_id  # Pass user_id as state to recover it in callback
             )
             
+            # Save code_verifier to database for PKCE validation in callback
+            if hasattr(flow, 'code_verifier'):
+                from core.database import db
+                await db["oauth_sessions"].update_one(
+                    {"user_id": user_id},
+                    {"$set": {
+                        "code_verifier": flow.code_verifier,
+                        "updated_at": datetime.now()
+                    }},
+                    upsert=True
+                )
+            
             return {
                 "oauth_url": auth_url,
                 "state": state
@@ -86,8 +98,18 @@ class GoogleOAuthController:
             user_id = state  # We passed user_id as state
             
             flow = GoogleOAuthController._get_flow(redirect_uri)
+            
+            # Retrieve code_verifier from database
+            from core.database import db
+            session = await db["oauth_sessions"].find_one({"user_id": user_id})
+            if session and "code_verifier" in session:
+                flow.code_verifier = session["code_verifier"]
+                
             flow.fetch_token(code=code)
             creds = flow.credentials
+            
+            # Clean up the session
+            await db["oauth_sessions"].delete_one({"user_id": user_id})
             
             # Get user email from Google
             from googleapiclient.discovery import build
