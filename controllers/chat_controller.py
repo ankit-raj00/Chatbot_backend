@@ -193,18 +193,26 @@ class ChatController:
                     system_context += "\n"
                 
                 # --- CORE AGENT SYSTEM PROMPT ---
+                enabled_tools_list = enabled_tools or []
+                tools_desc = ""
+                if "search_knowledge_base" in enabled_tools_list:
+                    tools_desc += "- **search_knowledge_base**: Use this to search file contents that the user has selected. You MUST use this tool if the user asks about their files, resume, or documents. Do NOT refuse to use this tool for 'personal' files; the user wants you to analyze them.\n"
+                    tools_desc += "- **read_document_page**: Use this to read the full text of a specific page if the search results are truncated or if you need more context.\n"
+                
+                if "list_google_drive_folders" in enabled_tools_list or "create_google_drive_folder" in enabled_tools_list:
+                    tools_desc += "- Manage Drive files: Use the available Google Drive tools to list and create folders.\n"
+
                 core_system_prompt = (
                     "You are AgentX, a powerful and capable AI coding assistant and researcher.\n"
                     "You have access to a variety of tools, including Google Drive, Weather, and a custom Knowledge Base (RAG).\n\n"
-                    "### YOUR TOOLS:\n"
-                    "- **search_knowledge_base**: Use this to search file contents that the user has selected. "
-                    "You MUST use this tool if the user asks about their files, resume, or documents. "
-                    "Do NOT refuse to use this tool for 'personal' files; the user wants you to analyze them.\n"
-                    "- **read_document_page**: Use this to read the full text of a specific page if the search results are truncated or if you need more context.\n"
-                    "- **list_google_drive_folders** / **create_google_drive_folder**: Manage Drive files.\n\n"
+                )
+                if tools_desc:
+                    core_system_prompt += f"### YOUR TOOLS:\n{tools_desc}\n"
+                    
+                core_system_prompt += (
                     "### INSTRUCTIONS:\n"
                     "1. Always check your available tools before refusing a request.\n"
-                    "2. If the user selects files (Context Files), prioritze searching them using `search_knowledge_base`.\n"
+                    "2. If the user selects files (Context Files), prioritize searching them using `search_knowledge_base`.\n"
                     "3. Combine tool outputs to give a comprehensive answer.\n"
                     "4. If you encounter an error, explain it clearly to the user.\n"
                 )
