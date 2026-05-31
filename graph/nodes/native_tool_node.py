@@ -7,6 +7,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableConfig
 from graph.nodes.common import ChatState
 from tools import get_tool, AVAILABLE_TOOLS
+from utils.hooks import run_pre_tool_hooks, run_post_tool_hooks, ToolTimer
 
 async def native_tool_node(state: ChatState, config: RunnableConfig) -> Dict[str, Any]:
     """
@@ -68,14 +69,35 @@ async def native_tool_node(state: ChatState, config: RunnableConfig) -> Dict[str
                 if "selected_files" in sig.parameters and selected_files is not None:
                      exec_args["selected_files"] = selected_files
                 
-                # 3. Execute
-                if tool_instance.coroutine:
-                    output = await tool_instance.ainvoke(exec_args)
-                else:
-                    output = tool_instance.invoke(exec_args)
+                # ── Run pre-tool hooks ────────────────────────────
+                hook_result = await run_pre_tool_hooks(tool_name, tool_args, user_id or "")
+                if hook_result and hook_result.get("deny"):
+                    output = f"Tool call blocked: {hook_result.get('reason', 'blocked by hook')}"
+                    results.append(ToolMessage(
+                        content=output,
+                        name=tool_name,
+                        tool_call_id=tool_call_id,
+                        status="error"
+                    ))
+                    continue
+
+                # Apply argument modifications from hook
+                if hook_result and hook_result.get("modify"):
+                    exec_args = hook_result.get("args", exec_args)
+
+                # ── Execute tool ──────────────────────────────────
+                try:
+                    with ToolTimer() as timer:
+                        if tool_instance.coroutine:
+                            output = await tool_instance.ainvoke(exec_args)
+                        else:
+                            output = tool_instance.invoke(exec_args)
                     
-            except Exception as e:
-                output = f"Error executing {tool_name}: {str(e)}"
+                    # ── Run post-tool hooks ───────────────────────
+                    await run_post_tool_hooks(tool_name, output, timer.elapsed_ms, user_id or "")
+
+                except Exception as e:
+                    output = f"Error executing {tool_name}: {str(e)}"
         else:
             output = f"Native tool '{tool_name}' not found."
             
