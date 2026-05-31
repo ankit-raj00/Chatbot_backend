@@ -141,6 +141,15 @@ class ChatService:
             }
 
             config = {
+                "run_name": f"chat | user={user_id[:8]} | conv={conversation_id[:8]}",
+                "tags": [f"user:{user_id}", f"conv:{conversation_id}", f"model:{model}"],
+                "metadata": {
+                    "user_id": user_id,
+                    "conversation_id": conversation_id,
+                    "model": model,
+                    "enabled_tools": enabled_tools,
+                    "has_files": bool(files_content_parts),
+                },
                 "configurable": {
                     "enabled_tools": enabled_tools,
                     "user_id": user_id,
@@ -151,14 +160,21 @@ class ChatService:
             # ── Step 7: Stream graph events ─────────────────────────────
             full_response = ""
             tool_steps = []
+            # Token tracking — populated from on_chat_model_end
+            total_input_tokens = 0
+            total_output_tokens = 0
+            # Gemini 2.5 Flash pricing (USD per token)
+            INPUT_PRICE_PER_TOKEN  = 0.075 / 1_000_000
+            OUTPUT_PRICE_PER_TOKEN = 0.30  / 1_000_000
 
-            async for event in chat_graph.astream_events(graph_input, version="v1", config=config):
+            async for event in chat_graph.astream_events(graph_input, version="v2", config=config):
                 if not isinstance(event, dict):
                     continue
 
                 event_type = event.get("event")
+                node_name = event.get("metadata", {}).get("langgraph_node", "")
 
-                if event_type == "on_chat_model_stream":
+                if event_type == "on_chat_model_stream" and node_name == "chat_model":
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
                         text = ""
@@ -170,8 +186,9 @@ class ChatService:
                                     text += part["text"]
                         else:
                             text = str(chunk.content)
-                        full_response += text
-                        yield f"data: {json.dumps({'chunk': text})}\n\n"
+                        if text:
+                            full_response += text
+                            yield f"data: {json.dumps({'chunk': text})}\n\n"
 
                 elif event_type == "on_tool_start":
                     tool_name = event.get("name")
@@ -190,13 +207,38 @@ class ChatService:
                             step["status"] = "completed"
                             break
 
+                elif event_type == "on_chat_model_end" and node_name == "chat_model":
+                    # v2: safely captures tokens from inside the 'chat_model' node only
+                    output_msg = event.get("data", {}).get("output")
+                    if output_msg and hasattr(output_msg, "usage_metadata") and output_msg.usage_metadata:
+                        usage = output_msg.usage_metadata
+                        total_input_tokens  += usage.get("input_tokens", 0)
+                        total_output_tokens += usage.get("output_tokens", 0)
+                        logger.info(
+                            "token.usage",
+                            user_id=user_id,
+                            conversation_id=conversation_id,
+                            model=model,
+                            input_tokens=usage.get("input_tokens", 0),
+                            output_tokens=usage.get("output_tokens", 0),
+                        )
+
+
             # ── Step 8: Save AI response + invalidate cache ─────────────
+            cost_usd = (
+                total_input_tokens  * INPUT_PRICE_PER_TOKEN +
+                total_output_tokens * OUTPUT_PRICE_PER_TOKEN
+            )
             await messages_collection.insert_one({
                 "conversation_id": conversation_id,
                 "user_id": user_id,
                 "role": "model",
                 "content": full_response,
                 "tool_steps": tool_steps,
+                "model": model,
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "cost_usd": round(cost_usd, 8),
                 "timestamp": datetime.now()
             })
 
