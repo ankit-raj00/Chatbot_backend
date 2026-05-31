@@ -22,6 +22,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from core.database import messages_collection, conversations_collection
 from services.history_service import HistoryService
 from services.prompt_builder import PromptBuilder
+from services.memory_service import MemoryService
 from graph.builder import chat_graph
 from utils.mcp_connection_manager import mcp_manager
 
@@ -117,13 +118,16 @@ class ChatService:
                 exclude_msg_id=inserted_user_msg_id
             )
 
+            # Fetch user memories for system prompt injection
+            user_memories = await MemoryService.get_user_memories(user_id)
+
             # ── Step 5: Build system prompt ─────────────────────────────
             mcp_resources, mcp_prompts = await cls._fetch_mcp_context()
             system_prompt = PromptBuilder.assemble(
                 enabled_tools=enabled_tools,
                 mcp_resources=mcp_resources,
                 mcp_prompts=mcp_prompts,
-                user_memories=[],   # Phase 8 will populate this
+                user_memories=user_memories,   # Phase 8 will populate this
             )
 
             # ── Step 6: Build graph input ───────────────────────────────
@@ -194,6 +198,16 @@ class ChatService:
                 "tool_steps": tool_steps,
                 "timestamp": datetime.now()
             })
+
+            # Trigger async memory extraction (non-blocking, errors are caught internally)
+            import asyncio
+            asyncio.create_task(
+                MemoryService.extract_and_store(
+                    user_id=user_id,
+                    human_message=message,
+                    ai_response=full_response,
+                )
+            )
 
             # Invalidate history cache so next turn gets fresh data
             await HistoryService.invalidate(conversation_id)
