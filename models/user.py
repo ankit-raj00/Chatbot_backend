@@ -8,6 +8,7 @@ class User(BaseModel):
     email: EmailStr
     name: str
     password: str  # Hashed password
+    is_admin: bool = False
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
     
@@ -31,6 +32,7 @@ class UserResponse(BaseModel):
     id: str = Field(alias="_id")
     email: EmailStr
     name: str
+    is_admin: bool = False
     created_at: datetime
     
     class Config:

@@ -47,7 +47,8 @@ class AuthController:
                 "user": {
                     "id": user_id,
                     "name": user_data.name,
-                    "email": user_data.email
+                    "email": user_data.email,
+                    "is_admin": False
                 },
                 "message": "User created successfully"
             })
@@ -103,7 +104,8 @@ class AuthController:
                 "user": {
                     "id": str(user["_id"]),
                     "name": user["name"],
-                    "email": user["email"]
+                    "email": user["email"],
+                    "is_admin": user.get("is_admin", False)
                 },
                 "message": "Login successful"
             })
@@ -144,5 +146,6 @@ class AuthController:
             "id": str(current_user["_id"]),
             "email": current_user["email"],
             "name": current_user["name"],
+            "is_admin": current_user.get("is_admin", False),
             "created_at": current_user["created_at"]
         }
