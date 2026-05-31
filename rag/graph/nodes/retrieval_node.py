@@ -125,3 +125,92 @@ class RetrievalNode:
                 **state,
                 "documents": []
             }
+
+async def parallel_retrieve_node(state: RAGGraphState) -> RAGGraphState:
+    """
+    Runs Qdrant vector search and Tavily web search in parallel.
+    Merges results, deduplicates by content hash.
+    Falls back gracefully if either source fails.
+
+    WHY asyncio.gather with return_exceptions=True:
+        If Tavily is down or key is missing, we still get Qdrant results.
+        The exception is caught per-source, not globally.
+    """
+    import asyncio
+    import hashlib
+    from langchain_core.documents import Document
+
+    question = state["question"]
+    selected_file_ids = state.get("selected_file_ids")
+
+    # ── Task 1: Qdrant vector search ─────────────────────────────
+    async def run_qdrant():
+        node = RetrievalNode()
+        # Use asyncio.to_thread because retrieve() is synchronous
+        result_state = await asyncio.to_thread(node.retrieve, {
+            "question": question,
+            "selected_file_ids": selected_file_ids,
+            "documents": [], "generation": None,
+            "web_search_needed": False,
+            "hallucination_count": 0, "retry_count": 0, "messages": []
+        })
+        return result_state.get("documents", [])
+
+    # ── Task 2: Tavily web search ─────────────────────────────────
+    async def run_web_search():
+        from langchain_tavily import TavilySearch
+        from langchain_core.documents import Document
+        try:
+            tool = TavilySearch(max_results=3)
+            results = tool.invoke({"query": question})
+            docs = []
+            if isinstance(results, list):
+                for r in results:
+                    docs.append(Document(
+                        page_content=r.get("content", ""),
+                        metadata={"source": r.get("url", "web_search"), "type": "web"}
+                    ))
+            return docs
+        except Exception as e:
+            logger.warning(f"Parallel web search failed: {e}")
+            return []
+
+    # ── Run both in parallel ──────────────────────────────────────
+    qdrant_docs, web_docs = await asyncio.gather(
+        run_qdrant(),
+        run_web_search(),
+        return_exceptions=True
+    )
+
+    # Handle exceptions from gather
+    if isinstance(qdrant_docs, Exception):
+        logger.error(f"Qdrant retrieval failed in parallel mode: {qdrant_docs}")
+        qdrant_docs = []
+    if isinstance(web_docs, Exception):
+        logger.warning(f"Web search failed in parallel mode: {web_docs}")
+        web_docs = []
+
+    # ── Merge and deduplicate ─────────────────────────────────────
+    all_docs = list(qdrant_docs) + list(web_docs)
+
+    seen_hashes = set()
+    unique_docs = []
+    for doc in all_docs:
+        content_hash = hashlib.md5(doc.page_content[:200].encode()).hexdigest()
+        if content_hash not in seen_hashes:
+            seen_hashes.add(content_hash)
+            unique_docs.append(doc)
+
+    logger.info(
+        f"Parallel retrieval: {len(qdrant_docs)} vector + {len(web_docs)} web = "
+        f"{len(unique_docs)} unique docs"
+    )
+
+    return {
+        **state,
+        "question": question,
+        "documents": unique_docs,
+        "web_search_needed": False,   # Already did web search in parallel
+        "hallucination_count": state.get("hallucination_count", 0),
+        "retry_count": state.get("retry_count", 0),
+    }
