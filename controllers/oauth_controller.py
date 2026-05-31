@@ -1,5 +1,5 @@
 from fastapi import HTTPException, status
-from core.database import oauth_tokens_collection
+from core.database import oauth_tokens_collection, mcp_servers_collection
 from datetime import datetime, timedelta
 from bson import ObjectId
 import secrets

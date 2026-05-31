@@ -113,7 +113,7 @@ class ChatController:
                 )
 
             # 4. Save User Message (Unchanged)
-            await messages_collection.insert_one({
+            user_msg_result = await messages_collection.insert_one({
                 "conversation_id": conversation_id,
                 "user_id": user_id,
                 "role": "user",
@@ -121,6 +121,7 @@ class ChatController:
                 "attachments": attachments if attachments else None,
                 "timestamp": datetime.now()
             })
+            inserted_user_msg_id = user_msg_result.inserted_id
 
             # 5. Connect to MCP Servers (New: Ensure connections for Graph)
             if mcp_server_urls:
@@ -130,19 +131,17 @@ class ChatController:
             # 6. Build History (Native -> LangChain Message Objects)
             history_messages = []
             
-            # Retrieve last 50 messages for context
+            # Retrieve last 30 messages for context
             msgs_cursor = messages_collection.find({
                 "conversation_id": conversation_id, 
-                "user_id": user_id
+                "user_id": user_id,
+                "_id": {"$ne": inserted_user_msg_id}
             }).sort("timestamp", 1)
             
-            stored_messages = await msgs_cursor.to_list(length=50) # Avoid excessive context
+            stored_messages = await msgs_cursor.to_list(length=30) # Avoid excessive context
             
             for msg in stored_messages:
                  if str(msg.get("_id")) == str(conversation_id): continue # Skip conversation logic if mixed? No.
-                 # Skip the current message we just inserted (logic match)
-                 if msg["content"] == message and abs((msg["timestamp"] - datetime.now()).total_seconds()) < 1:
-                     continue
 
                  content_parts = [{"type": "text", "text": msg.get("content", "")}]
                  
