@@ -9,7 +9,8 @@ except ImportError:
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import structlog
+logger = structlog.get_logger(__name__)
 
 class QdrantManager:
     """
@@ -191,6 +192,40 @@ class QdrantManager:
             logger.error(f"Failed to list sources: {e}")
             return []
 
+    def delete_file(self, file_id: str, user_id: str = None) -> bool:
+        """
+        Deletes all chunks associated with a specific file_id.
+        Optionally filters by user_id for security.
+        """
+        try:
+            self.ensure_collection()
+            
+            must_conditions = [
+                models.FieldCondition(
+                    key="metadata.file_id",
+                    match=models.MatchValue(value=file_id)
+                )
+            ]
+            
+            if user_id:
+                must_conditions.append(
+                    models.FieldCondition(
+                        key="metadata.user_id",
+                        match=models.MatchValue(value=user_id)
+                    )
+                )
+                
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=models.FilterSelector(
+                    filter=models.Filter(must=must_conditions)
+                )
+            )
+            logger.info(f"🗑️ Deleted all points for file_id: {file_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete file {file_id}: {e}")
+            return False
 
     def get_vector_store(self) -> QdrantVectorStore:
         """Returns the LangChain QdrantVectorStore wrapper."""

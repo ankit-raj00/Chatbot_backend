@@ -37,15 +37,7 @@ class ModelConfig:
             "max_tokens": 8192,
             "context_window": 1000000,
         },
-        "gemini-2.5-flash-lite": {
-            "name": "Gemini 2.5 Flash Lite",
-            "description": "Lightweight and fast, for simple tasks",
-            "supports_images": True,
-            "supports_video": False,
-            "supports_audio": False,
-            "max_tokens": 4096,
-            "context_window": 100000,
-        },
+
         "gemini-flash-latest": {
             "name": "Gemini Flash (Latest)",
             "description": "Latest flash model with newest features",

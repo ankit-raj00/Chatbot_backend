@@ -6,7 +6,8 @@ from config.rag_config import RAG_MODEL
 from rag.graph.state import RAGGraphState
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import structlog
+logger = structlog.get_logger(__name__)
 
 
 class GraderNode:

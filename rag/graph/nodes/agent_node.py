@@ -10,7 +10,8 @@ from rag.tools.doc_store_tools import read_document_page
 import logging
 import os
 
-logger = logging.getLogger(__name__)
+import structlog
+logger = structlog.get_logger(__name__)
 
 class AgentNode:
     """
