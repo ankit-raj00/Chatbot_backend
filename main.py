@@ -30,10 +30,22 @@ from routes.rag_routes import router as rag_router
 
 from contextlib import asynccontextmanager
 
+from core.cache import init_redis, close_redis
+
 # Lifespan event handler
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan events for initialization and cleanup"""
+
+    # ── Phase 2: Initialize Redis ─────────────────────────────
+    try:
+        await init_redis()
+    except RuntimeError as e:
+        print(f"⚠️  Redis startup warning: {e}")
+        print("    App will continue but caching features will be disabled.")
+        # Do NOT raise here in dev — allow app to start without Redis
+        # In production, set REDIS_URL correctly so this never triggers
+
     # Startup: Initialize native tools
     try:
         from core.database import tools_collection
@@ -87,6 +99,9 @@ async def lifespan(app: FastAPI):
     print("🧹 Shutting down: Cleaning up MCP connections")
     from utils.mcp_connection_manager import mcp_manager
     await mcp_manager.disconnect_all()
+    
+    # Phase 2: Close Redis
+    await close_redis()
 
 # Create FastAPI app with lifespan
 app = FastAPI(
