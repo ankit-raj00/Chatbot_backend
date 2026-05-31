@@ -9,9 +9,6 @@ from typing import Dict, Any
 class OAuthController:
     """Controller for OAuth authentication flow"""
     
-    # In-memory storage for OAuth states (in production, use Redis)
-    oauth_states: Dict[str, Dict[str, Any]] = {}
-    
     @staticmethod
     async def initiate_oauth(server_id: str, user_id: str, redirect_uri: str):
         """Initiate OAuth flow for an MCP server"""
@@ -35,12 +32,16 @@ class OAuthController:
             state = secrets.token_urlsafe(32)
             
             # Store state with server info
-            OAuthController.oauth_states[state] = {
-                "server_id": server_id,
-                "user_id": user_id,
-                "created_at": datetime.now(),
-                "redirect_uri": redirect_uri
-            }
+            from core.cache import cache_set
+            await cache_set(
+                f"oauth_state:{state}",
+                {
+                    "server_id": server_id,
+                    "user_id": user_id,
+                    "redirect_uri": redirect_uri
+                },
+                ttl_seconds=600   # 10 minutes
+            )
             
             # Build OAuth URL
             auth_url = oauth_config.get("auth_url")
@@ -70,16 +71,14 @@ class OAuthController:
     async def handle_callback(code: str, state: str):
         """Handle OAuth callback and exchange code for tokens"""
         try:
-            # Validate state
-            if state not in OAuthController.oauth_states:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid state")
+            from core.cache import cache_get, cache_delete
+            state_data = await cache_get(f"oauth_state:{state}")
             
-            state_data = OAuthController.oauth_states[state]
-            
-            # Check if state is expired (10 minutes)
-            if datetime.now() - state_data["created_at"] > timedelta(minutes=10):
-                del OAuthController.oauth_states[state]
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="State expired")
+            if not state_data:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid or expired OAuth state. Please restart the authorization flow."
+                )
             
             server_id = state_data["server_id"]
             user_id = state_data["user_id"]
@@ -135,7 +134,7 @@ class OAuthController:
             )
             
             # Clean up state
-            del OAuthController.oauth_states[state]
+            await cache_delete(f"oauth_state:{state}")
             
             return {
                 "success": True,

@@ -31,6 +31,10 @@ from routes.rag_routes import router as rag_router
 from contextlib import asynccontextmanager
 
 from core.cache import init_redis, close_redis
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from core.limiter import limiter
 
 # Lifespan event handler
 @asynccontextmanager
@@ -110,6 +114,10 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 # Add CORS middleware
 app.add_middleware(

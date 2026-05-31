@@ -1,8 +1,10 @@
-from fastapi import APIRouter, Depends, Form, File, UploadFile
+from fastapi import APIRouter, Depends, Form, File, UploadFile, Request
 from pydantic import BaseModel
 from typing import List, Optional
 from controllers.chat_controller import ChatController
 from core.middleware import get_current_user
+from core.limiter import limiter
+import os
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 
@@ -20,18 +22,23 @@ class ChatRequest(BaseModel):
 
 
 @router.post("/stream")
-async def chat_stream(request: ChatRequest, current_user: dict = Depends(get_current_user)):
+@limiter.limit(f"{os.getenv('CHAT_RATE_LIMIT', '20')}/minute")
+async def chat_stream(
+    request: Request,
+    chat_request: ChatRequest,
+    current_user: dict = Depends(get_current_user)
+):
     """Process chat message with streaming response"""
     from fastapi.responses import StreamingResponse
     return StreamingResponse(
         chat_controller.process_chat_stream(
             user_id=str(current_user["_id"]),
-            message=request.message,
-            conversation_id=request.conversation_id,
-            mcp_server_urls=request.mcp_server_urls,
-            model=request.model,
-            enabled_tools=request.enabled_tools,
-            selected_files=request.selected_files
+            message=chat_request.message,
+            conversation_id=chat_request.conversation_id,
+            mcp_server_urls=chat_request.mcp_server_urls,
+            model=chat_request.model,
+            enabled_tools=chat_request.enabled_tools,
+            selected_files=chat_request.selected_files
         ),
         media_type="text/event-stream"
     )
