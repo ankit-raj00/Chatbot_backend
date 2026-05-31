@@ -3,7 +3,8 @@ from qdrant_client import models
 from rag.vector_store.qdrant_manager import QdrantManager
 import logging
 
-logger = logging.getLogger(__name__)
+import structlog
+logger = structlog.get_logger(__name__)
 
 # Initialize QdrantManager once
 qdrant_manager = QdrantManager()
@@ -33,6 +34,10 @@ def search_knowledge_base(
         List[Dict]: A list of chunks with 'content', 'source', 'score', and 'id'.
     """
     try:
+        if not query or not query.strip():
+            logger.warning("Empty query provided to search_knowledge_base")
+            return [{"error": "You must provide a non-empty query string to search."}]
+            
         logger.info(f"🛠️ Tool Call: search_knowledge_base(query='{query}', files={selected_files}, limit={limit}, offset={offset}, user_id={user_id})")
         
         vector_store = qdrant_manager.get_vector_store()

@@ -22,7 +22,8 @@ from rag.chunking.splitter_factory import SplitterFactory
 from rag.vector_store.qdrant_manager import QdrantManager
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import structlog
+logger = structlog.get_logger(__name__)
 
 class IngestionService:
     """
@@ -117,6 +118,71 @@ class IngestionService:
             if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)
             raise e
+
+    async def process_upload_from_path(
+        self,
+        file_path: str,
+        filename: str,
+        document_type: str = "Auto (Detect)",
+        user_id: str = None
+    ) -> dict:
+        """
+        Processes an already-saved file at file_path.
+        Called by the background job task — the UploadFile is no longer available.
+        Same pipeline as process_upload but accepts a path instead of UploadFile.
+        Returns: {"status", "file_id", "filename", "strategy", "chunks_count"}
+        """
+        import uuid as uuid_mod
+        from langchain_core.documents import Document as LCDoc
+
+        try:
+            logger.info(f"--- 📥 Background Ingestion: {filename} [Type: {document_type}] ---")
+
+            file_size = os.path.getsize(file_path)
+
+            # Smart Routing
+            route_config = self.router.route(filename, "", file_size, force_category=document_type)
+            logger.info(f"   ✅ Route: [{route_config['type_category']}] — {route_config['rationale']}")
+
+            # Parsing
+            docs = await self.parser.parse(file_path, route_config["parser_config"])
+            logger.info(f"   ✅ Parsed {len(docs)} raw documents.")
+
+            file_id = str(uuid_mod.uuid4())
+
+            for doc in docs:
+                doc.metadata["source"]  = filename
+                doc.metadata["file_id"] = file_id
+                if user_id:
+                    doc.metadata["user_id"] = user_id
+
+            # Splitting & Indexing
+            self._index_documents(docs, route_config)
+
+            # Estimate chunks count from standard split
+            try:
+                splitter = self.splitter_factory.get_splitter(
+                    route_config.get("chunking_strategy", "recursive"),
+                    route_config.get("chunker_config", {})
+                )
+                chunks = splitter.split_documents(docs)
+                chunks_count = len(chunks)
+            except Exception:
+                chunks_count = len(docs)
+
+            logger.info(f"--- ✅ Background Ingestion Complete: {filename} ({chunks_count} chunks) ---")
+
+            return {
+                "status": "success",
+                "file_id": file_id,
+                "filename": filename,
+                "strategy": route_config,
+                "chunks_count": chunks_count,
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Background ingestion failed: {e}", exc_info=True)
+            raise
 
     def _index_documents(self, docs: List[Document], config: Dict[str, Any]):
         """

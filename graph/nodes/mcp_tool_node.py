@@ -8,6 +8,7 @@ from langchain_core.runnables import RunnableConfig
 from graph.nodes.common import ChatState
 from tools import AVAILABLE_TOOLS
 from utils.mcp_connection_manager import mcp_manager
+from utils.hooks import run_pre_tool_hooks, run_post_tool_hooks, ToolTimer
 
 async def mcp_tool_node(state: ChatState, config: RunnableConfig) -> Dict[str, Any]:
     """
@@ -29,14 +30,23 @@ async def mcp_tool_node(state: ChatState, config: RunnableConfig) -> Dict[str, A
             continue
         
         try:
-            # Execute via manager
-            # This handles finding the tool across multiple servers
-            result = await mcp_manager.call_tool_by_name(tool_name, tool_args)
+            # Pre-tool hook
+            hook_result = await run_pre_tool_hooks(tool_name, tool_args, "")
+            if hook_result and hook_result.get("deny"):
+                output = f"Tool call blocked: {hook_result.get('reason', 'blocked by hook')}"
+                results.append(ToolMessage(content=output, name=tool_name, tool_call_id=tool_call_id))
+                continue
+
+            if hook_result and hook_result.get("modify"):
+                tool_args = hook_result.get("args", tool_args)
+
+            with ToolTimer() as timer:
+                result = await mcp_manager.call_tool_by_name(tool_name, tool_args)
             output = str(result)
-            
-            # Note: MCP result might be a list of Content objects, or text.
-            # We convert to string for the LLM.
-            
+
+            # Post-tool hook
+            await run_post_tool_hooks(tool_name, output, timer.elapsed_ms, "")
+
         except Exception as e:
             output = f"Error executing MCP tool {tool_name}: {str(e)}"
             

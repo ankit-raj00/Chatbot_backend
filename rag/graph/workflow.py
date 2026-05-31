@@ -1,14 +1,15 @@
 import logging
 from langgraph.graph import END, StateGraph
 from rag.graph.state import RAGGraphState
-from rag.graph.nodes.retrieval_node import RetrievalNode
+from rag.graph.nodes.retrieval_node import RetrievalNode, parallel_retrieve_node
 from rag.graph.nodes.grader_node import GraderNode
 from rag.graph.nodes.agent_node import AgentNode
 from rag.graph.nodes.hallucination_node import HallucinationNode
 from rag.graph.nodes.web_search_node import WebSearchNode
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import structlog
+logger = structlog.get_logger(__name__)
 
 class RAGWorkflow:
     """
@@ -31,22 +32,22 @@ class RAGWorkflow:
 
     def _build_graph(self):
         # 1. Add Nodes
-        self.workflow.add_node("retrieve", self.retriever.retrieve)
+        self.workflow.add_node("parallel_retrieve", parallel_retrieve_node)
         self.workflow.add_node("grade_documents", self.grader.grade_documents)
         self.workflow.add_node("agent", self.agent.generate)
         self.workflow.add_node("hallucination_check", self.hallucinator.check_hallucination)
-        self.workflow.add_node("web_search", self.web_search.search)
+        self.workflow.add_node("web_search", self.web_search.search) # Kept for backward compatibility
 
         # 2. Build Edges
-        self.workflow.set_entry_point("retrieve")
-        self.workflow.add_edge("retrieve", "grade_documents")
+        self.workflow.set_entry_point("parallel_retrieve")
+        self.workflow.add_edge("parallel_retrieve", "grade_documents")
         
-        # Conditional Edge: Grade -> (Agent OR Web Search)
+        # Conditional Edge: Grade -> Agent
         self.workflow.add_conditional_edges(
             "grade_documents",
             self._decide_to_generate,
             {
-                "web_search": "web_search",
+                "web_search": "agent",
                 "generate": "agent",
             },
         )
@@ -70,15 +71,11 @@ class RAGWorkflow:
     # --- Conditional Logic Helpers ---
     
     def _decide_to_generate(self, state: RAGGraphState):
-        """
-        Determines whether to generate (documents valid) or fall back to web search.
-        """
-        if state.get("web_search_needed"):
-            logger.info("Decision: WEB SEARCH")
-            return "web_search"
-        else:
-            logger.info("Decision: AGENT")
-            return "generate"
+        """After parallel retrieval, always go to agent (web search already ran)."""
+        docs = state.get("documents", [])
+        if not docs:
+            logger.warning("No documents after parallel retrieval — agent will rely on training data")
+        return "generate"
 
     def _decide_to_retry(self, state: RAGGraphState):
         """
