@@ -30,6 +30,11 @@ langchain_tavily
 nest_asyncio
 tenacity
 
+# ─── Phase 0 additions ───────────────────────────────────────
+redis[hiredis]>=5.0.0
+slowapi>=0.1.9
+structlog>=24.0.0
+langsmith>=0.1.0
 # Optional heavy dependencies (disabled for Vercel 500MB lambda limit)
 # unstructured
 # langchain-unstructured

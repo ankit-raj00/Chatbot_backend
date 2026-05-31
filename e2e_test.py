@@ -18,7 +18,8 @@ import os
 #  CONFIG
 # ──────────────────────────────────────────────
 BASE_URL      = "https://chatbot-backend-jsfm.onrender.com"
-PDF_PATH      = r"D:\Downloads\Image_based_question (3).pdf"
+import os as _os
+PDF_PATH = _os.getenv("E2E_PDF_PATH", "./tests/fixtures/sample.pdf")
 TEST_EMAIL    = f"e2etest_{int(time.time())}@test.com"
 TEST_PASSWORD = "TestPass@123"
 TEST_NAME     = "E2E Tester"
@@ -232,6 +233,11 @@ def test_chat_with_tool():
 #  14 — PDF UPLOAD + INGESTION
 # ══════════════════════════════════════════════
 def test_pdf_upload():
+    if not os.path.exists(PDF_PATH):
+        print(f"   ⚠️  PDF not found at {PDF_PATH}. Skipping upload test.")
+        print(f"   Set E2E_PDF_PATH env var to a real PDF path to enable this test.")
+        results.append(("SKIP", "PDF Upload + Ingestion"))
+        return
     assert os.path.exists(PDF_PATH), f"PDF not found: {PDF_PATH}"
     mb = os.path.getsize(PDF_PATH) / 1024 / 1024
     print(f"   File: {os.path.basename(PDF_PATH)} ({mb:.2f} MB)")
