@@ -42,14 +42,9 @@ async def chat_model_node(state: ChatState, config: RunnableConfig):
     mcp_tools = await mcp_manager.get_all_langchain_tools()
     tools_to_bind.extend(mcp_tools)
     
-    # 3. Initialize Model
-    # We use a fresh instance to ensure clean tool binding each turn
-    llm = ChatGoogleGenerativeAI(
-        model=model_name,
-        temperature=0.7,
-        max_tokens=None,
-        max_retries=2,
-    )
+    # 3. Get cached LLM instance (created once, reused per model name)
+    from graph.llm_registry import get_llm
+    llm = get_llm(model_name)
     
     if tools_to_bind:
         llm = llm.bind_tools(tools_to_bind)
