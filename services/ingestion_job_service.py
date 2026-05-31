@@ -23,7 +23,8 @@ from datetime import datetime, timezone
 
 from core.cache import cache_set, cache_get
 
-logger = logging.getLogger(__name__)
+import structlog
+logger = structlog.get_logger(__name__)
 
 JOB_TTL_SECONDS = 86400    # 24 hours
 JOB_KEY_PREFIX = "ingest_job"

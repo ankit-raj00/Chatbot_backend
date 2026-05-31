@@ -5,7 +5,7 @@ from models.user import UserCreate, UserLogin
 from core.auth import verify_password, get_password_hash, create_access_token
 from datetime import datetime
 from bson import ObjectId
-
+import os
 class AuthController:
     """Controller for authentication operations"""
     
@@ -53,12 +53,13 @@ class AuthController:
             })
             
             # Set HTTP-only cookie
+            is_prod = os.getenv("ENVIRONMENT", "development") == "production"
             response.set_cookie(
                 key="access_token",
                 value=access_token,
                 httponly=True,
-                secure=True,  # Required for SameSite=None
-                samesite="none",  # Required for cross-site requests
+                secure=is_prod,
+                samesite="none" if is_prod else "lax",
                 max_age=30 * 24 * 60 * 60  # 30 days
             )
             
@@ -108,12 +109,13 @@ class AuthController:
             })
             
             # Set HTTP-only cookie
+            is_prod = os.getenv("ENVIRONMENT", "development") == "production"
             response.set_cookie(
                 key="access_token",
                 value=access_token,
                 httponly=True,
-                secure=True,  # Required for SameSite=None
-                samesite="none",  # Required for cross-site requests
+                secure=is_prod,
+                samesite="none" if is_prod else "lax",
                 max_age=30 * 24 * 60 * 60  # 30 days
             )
             

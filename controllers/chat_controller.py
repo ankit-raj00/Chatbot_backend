@@ -16,7 +16,8 @@ from google import genai
 from services.chat_service import ChatService
 from config.model_config import ModelConfig
 
-logger = logging.getLogger(__name__)
+import structlog
+logger = structlog.get_logger(__name__)
 
 
 class ChatController:

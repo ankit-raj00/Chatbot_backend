@@ -22,7 +22,8 @@ from rag.chunking.splitter_factory import SplitterFactory
 from rag.vector_store.qdrant_manager import QdrantManager
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import structlog
+logger = structlog.get_logger(__name__)
 
 class IngestionService:
     """

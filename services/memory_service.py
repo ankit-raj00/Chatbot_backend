@@ -20,7 +20,8 @@ from typing import Optional
 
 from core.database import db  # Access the motor client for the new collection
 
-logger = logging.getLogger(__name__)
+import structlog
+logger = structlog.get_logger(__name__)
 
 MAX_MEMORIES = 10   # Maximum memories to retain per user
 
@@ -39,8 +40,8 @@ Never include personally sensitive information like passwords or financial detai
 
 Example output:
 [
-  {"topic": "tech stack", "content": "Uses Python, FastAPI, and MongoDB"},
-  {"topic": "project", "content": "Building an AI agent platform called AgentX"}
+  {{"topic": "tech stack", "content": "Uses Python, FastAPI, and MongoDB"}},
+  {{"topic": "project", "content": "Building an AI agent platform called AgentX"}}
 ]
 
 Conversation:
@@ -72,7 +73,7 @@ class MemoryService:
         Called as a background task — errors are logged, not raised.
         Only runs if the conversation has substantial content (>50 chars each).
         """
-        if len(human_message) < 50 or len(ai_response) < 50:
+        if len(human_message) < 5 or len(ai_response) < 5:
             return   # Too short to have extractable facts
 
         try:
@@ -108,20 +109,22 @@ class MemoryService:
             if not new_memories:
                 return   # Nothing to store
 
-            logger.info(f"Extracted {len(new_memories)} memories for user {user_id}")
+            logger.info(f"Extracted {len(new_memories)} potential new memories for user {user_id}: {new_memories}")
 
             # Merge with existing memories
             existing = await MemoryService.get_user_memories(user_id)
-            existing_topics = {m["topic"] for m in existing}
+            existing_topics = {m.get("topic") for m in existing if m.get("topic")}
 
             merged = existing[:]
             for mem in new_memories:
-                if mem.get("topic") and mem.get("content"):
-                    if mem["topic"] in existing_topics:
+                topic = mem.get("topic")
+                content = mem.get("content")
+                if topic and content:
+                    if topic in existing_topics:
                         # Update existing memory for this topic
                         for m in merged:
-                            if m["topic"] == mem["topic"]:
-                                m["content"] = mem["content"]
+                            if m.get("topic") == topic:
+                                m["content"] = content
                                 m["updated_at"] = datetime.now().isoformat()
                     else:
                         mem["created_at"] = datetime.now().isoformat()
@@ -140,9 +143,11 @@ class MemoryService:
                 }},
                 upsert=True
             )
-            logger.info(f"Memory updated for user {user_id}: {len(merged)} total memories")
+            logger.info(f"Successfully saved memories to MongoDB for user {user_id}. Now holding {len(merged)} total memories.")
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             logger.warning(f"Memory extraction failed for {user_id} (non-fatal): {e}")
 
     @staticmethod

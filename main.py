@@ -1,6 +1,13 @@
 import os
 import sys
 
+# ── Configure structured logging FIRST ──────────────────────
+# Must be called before any logging.getLogger() calls in other modules
+from core.logging_config import configure_logging
+configure_logging()
+from core.request_context import CorrelationIdMiddleware
+# ────────────────────────────────────────────────────────────
+
 # stdout/stderr redirection removed for console visibility
 
 print(f"Executable: {sys.executable}")
@@ -50,6 +57,29 @@ async def lifespan(app: FastAPI):
         # Do NOT raise here in dev — allow app to start without Redis
         # In production, set REDIS_URL correctly so this never triggers
 
+    async def ensure_indexes():
+        """Create MongoDB indexes for query performance."""
+        from core.database import (
+            messages_collection, conversations_collection,
+            users_collection
+        )
+        # messages: fetch by conversation_id + user_id (most common query)
+        await messages_collection.create_index(
+            [("conversation_id", 1), ("user_id", 1), ("timestamp", 1)]
+        )
+        # conversations: list by user, sorted by updated_at
+        await conversations_collection.create_index(
+            [("user_id", 1), ("updated_at", -1)]
+        )
+        # users: lookup by email
+        await users_collection.create_index("email", unique=True)
+
+    try:
+        await ensure_indexes()
+        print("✅ MongoDB indexes verified")
+    except Exception as e:
+        print(f"⚠️  Index creation warning: {e}")
+
     # Startup: Initialize native tools
     try:
         from core.database import tools_collection
@@ -97,6 +127,16 @@ async def lifespan(app: FastAPI):
         # Don't fail startup if tools registration fails
         pass
 
+    # ── LangSmith tracing ─────────────────────────────────────
+    # If LANGCHAIN_TRACING_V2=true and LANGCHAIN_API_KEY are set,
+    # LangSmith will automatically trace all LangGraph runs.
+    # No code changes needed — the langsmith package hooks in automatically.
+    langsmith_enabled = os.getenv("LANGCHAIN_TRACING_V2", "false").lower() == "true"
+    if langsmith_enabled:
+        print(f"✅ LangSmith tracing enabled — project: {os.getenv('LANGCHAIN_PROJECT', 'default')}")
+    else:
+        print("ℹ️  LangSmith tracing disabled (set LANGCHAIN_TRACING_V2=true to enable)")
+
     yield # App is running
 
     # Shutdown: Cleanup MCP connections
@@ -115,36 +155,70 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Return a clean 422 with field-level error details."""
+    import structlog
+    log = structlog.get_logger("validation")
+    log.warning("request.validation_error", path=str(request.url.path), errors=exc.errors())
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "Validation error",
+            "detail": exc.errors(),
+            "path": str(request.url.path)
+        }
+    )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all handler — logs the exception and returns a clean 500."""
+    import structlog
+    log = structlog.get_logger("global_error")
+    log.error(
+        "unhandled.exception",
+        path=str(request.url.path),
+        error=str(exc),
+        exc_info=True
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal server error",
+            "message": "An unexpected error occurred. Please try again.",
+        }
+    )
+
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
 
 # Add CORS middleware
+_allowed_origins_raw = os.getenv(
+    "ALLOWED_ORIGINS",
+    "http://localhost:3000,http://localhost:5173"   # dev fallback
+)
+_allowed_origins = [o.strip() for o in _allowed_origins_raw.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        # Local dev
-        "http://localhost:3000",
-        "http://localhost:5173",
-        # Vercel deployments
-        "https://chatbot-backend-beta-nine.vercel.app",
-        "https://chatbot-khaki-eta-53.vercel.app",
-        "https://chatbot-ankit-raj00s-projects.vercel.app",
-        # Custom domain
-        "https://agentx.ankitrajai.in",
-    ],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],   # Explicit, not ["*"]
+    allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
 )
 
 # ── Pure ASGI logging middleware (avoids BaseHTTPMiddleware anyio conflicts) ──
+import structlog as _structlog
+import time as _time
+
+_access_log = _structlog.get_logger("access")
+
 class LoggingMiddleware:
-    """
-    Pure ASGI middleware for request logging.
-    Safer than @app.middleware('http') / BaseHTTPMiddleware on Python 3.12+
-    because it doesn't create a coroutine boundary via anyio.create_task_group().
-    """
+    """Structured access logging middleware."""
     def __init__(self, app):
         self.app = app
 
@@ -153,25 +227,27 @@ class LoggingMiddleware:
             await self.app(scope, receive, send)
             return
 
-        import time
+        start = _time.monotonic()
         request = Request(scope, receive)
-        start_time = time.time()
-        print(f"Incoming request: {request.method} {request.url}")
+        status_code = 500
 
         async def send_wrapper(message):
+            nonlocal status_code
             if message["type"] == "http.response.start":
-                process_time = time.time() - start_time
-                print(
-                    f"Request completed: {request.method} {request.url} "
-                    f"- Status: {message['status']} - Time: {process_time:.4f}s"
-                )
+                status_code = message["status"]
             await send(message)
 
         try:
             await self.app(scope, receive, send_wrapper)
-        except Exception as e:
-            print(f"Request failed: {request.method} {request.url} - Error: {str(e)}")
-            raise
+        finally:
+            elapsed_ms = (_time.monotonic() - start) * 1000
+            _access_log.info(
+                "http.request",
+                method=request.method,
+                path=request.url.path,
+                status=status_code,
+                duration_ms=round(elapsed_ms, 2),
+            )
 
 # Include routers
 app.include_router(auth_router)
@@ -186,7 +262,8 @@ app.include_router(user_router)
 app.include_router(upload_router)
 app.include_router(rag_router)
 
-# Attach pure ASGI logging middleware LAST (outermost layer)
+# Attach middlewares
+app.add_middleware(CorrelationIdMiddleware)
 app.add_middleware(LoggingMiddleware)  # type: ignore[arg-type]
 
 @app.api_route("/", methods=["GET", "HEAD"])
@@ -200,8 +277,53 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy"}
+    """
+    Deep health check — verifies all critical dependencies.
+    Returns 200 if healthy, 503 if any dependency is down.
+    Used by Render for health check URL.
+    """
+    from core.database import users_collection
+    from core.cache import get_redis
+
+    checks = {}
+    all_ok = True
+
+    # MongoDB check
+    try:
+        await users_collection.find_one({}, {"_id": 1})
+        checks["mongodb"] = "ok"
+    except Exception as e:
+        checks["mongodb"] = f"error: {str(e)[:50]}"
+        all_ok = False
+
+    # Redis check
+    try:
+        r = await get_redis()
+        await r.ping()
+        checks["redis"] = "ok"
+    except Exception as e:
+        checks["redis"] = f"error: {str(e)[:50]}"
+        # Redis failure is non-fatal — app still works, just slower
+
+    # Qdrant check (lightweight)
+    try:
+        from rag.vector_store.qdrant_manager import QdrantManager
+        mgr = QdrantManager()
+        mgr.client.get_collections()
+        checks["qdrant"] = "ok"
+    except Exception as e:
+        checks["qdrant"] = f"error: {str(e)[:50]}"
+        all_ok = False
+
+    status_code = 200 if all_ok else 503
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": "healthy" if all_ok else "degraded",
+            "checks": checks,
+            "version": os.getenv("SERVICE_VERSION", "unknown")
+        }
+    )
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))

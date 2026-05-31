@@ -55,6 +55,16 @@ async def chat_endpoint(request: ChatRequest):
         
         # Extract Results
         answer = final_state.get("generation", "No answer generated.")
+        if isinstance(answer, list):
+            # Extract text from list of content blocks if necessary
+            texts = []
+            for block in answer:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+                elif isinstance(block, str):
+                    texts.append(block)
+            answer = "\n".join(texts)
+            
         documents = final_state.get("documents", [])
         
         # Extract Sources (Metadata)
@@ -131,8 +141,28 @@ async def list_files(current_user: dict = Depends(get_current_user)):
         return {"files": sources}
     except Exception as e:
         logger.error(f"List files failed: {str(e)}")
-        # Return empty list on error to not break frontend
         return {"files": []}
+
+@router.delete("/file/{file_id}")
+async def delete_file(file_id: str, current_user: dict = Depends(get_current_user)):
+    """
+    Deletes a file and all its associated chunks from the Vector DB.
+    """
+    try:
+        from rag.vector_store.qdrant_manager import QdrantManager
+        manager = QdrantManager()
+        user_id = str(current_user.get("_id"))
+        
+        success = manager.delete_file(file_id=file_id, user_id=user_id)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to delete file from Qdrant")
+            
+        return {"status": "success", "message": f"File {file_id} deleted."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Delete file failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/read-page")
 async def read_page_tool(request: PageReadRequest):

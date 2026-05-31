@@ -1,6 +1,8 @@
 from typing import Dict, Optional, List, Any
 import asyncio
 import time
+import structlog
+logger = structlog.get_logger(__name__)
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_core.tools import BaseTool
 
@@ -33,11 +35,11 @@ class MCPConnectionManager:
         We create a separate client for each URL to support dynamic addition.
         """
         if url in self._clients:
-            print(f"MCP Server already registered: {url}")
+            logger.info(f"MCP Server already registered: {url}")
             return True
             
         try:
-            print(f"Registering MCP Client for: {url}")
+            logger.info(f"Registering MCP Client for: {url}")
             
             # Determine transport config
             transport_config = {}
@@ -78,11 +80,11 @@ class MCPConnectionManager:
             
             self._clients[url] = client
             self.invalidate_tool_cache(url)
-            print(f"Successfully registered: {url}")
+            logger.info(f"Successfully registered: {url}")
             return True
             
         except Exception as e:
-            print(f"Failed to register MCP server {url}: {e}")
+            logger.info(f"Failed to register MCP server {url}: {e}")
             return False
             
     async def get_all_langchain_tools(self) -> List[BaseTool]:
@@ -108,12 +110,12 @@ class MCPConnectionManager:
                 tools = await client.get_tools()
                 self._tool_cache[url] = (tools, now)
                 all_tools.extend(tools)
-                print(f"MCP tool cache refreshed for {url}: {len(tools)} tools")
+                logger.info(f"MCP tool cache refreshed for {url}: {len(tools)} tools")
             except Exception as e:
-                print(f"Error fetching tools from {url}: {e}")
+                logger.info(f"Error fetching tools from {url}: {e}")
                 if cached_tools is not None:
                     # Serve stale cache on error rather than failing
-                    print(f"Serving stale tool cache for {url} ({cache_age:.0f}s old)")
+                    logger.info(f"Serving stale tool cache for {url} ({cache_age:.0f}s old)")
                     all_tools.extend(cached_tools)
 
         return all_tools
@@ -128,7 +130,7 @@ class MCPConnectionManager:
             self._tool_cache.pop(url, None)
         else:
             self._tool_cache.clear()
-        print(f"MCP tool cache invalidated for: {url or 'all servers'}")
+        logger.info(f"MCP tool cache invalidated for: {url or 'all servers'}")
         
     async def get_tools_from_server(self, url: str) -> List[BaseTool]:
         """
@@ -141,7 +143,7 @@ class MCPConnectionManager:
         try:
              return await client.get_tools()
         except Exception as e:
-             print(f"Error fetching tools from {url}: {e}")
+             logger.info(f"Error fetching tools from {url}: {e}")
              raise e
         
     async def call_tool_by_name(self, name: str, args: dict) -> Any:
@@ -160,7 +162,7 @@ class MCPConnectionManager:
             
         # 3. Execute
         # LangChain tools support .ainvoke(args)
-        print(f"Executing MCP tool via Adapter: {name}")
+        logger.info(f"Executing MCP tool via Adapter: {name}")
         return await target_tool.ainvoke(args)
         
     # --- Legacy Methods (Stubs/Depracated) ---
@@ -171,7 +173,7 @@ class MCPConnectionManager:
     async def disconnect(self, url: str):
         if url in self._clients:
             del self._clients[url]
-            print(f"Unregistered: {url}")
+            logger.info(f"Unregistered: {url}")
 
     async def disconnect_all(self):
         self._clients.clear()
@@ -187,7 +189,7 @@ class MCPConnectionManager:
                     result = await session.list_resources()
                     
                     if result and result.resources:
-                        print(f"--- Fetched Resources from {url} ---")
+                        logger.info(f"--- Fetched Resources from {url} ---")
                         for r in result.resources:
                             # Standard attributes on MCP Resource object
                             uri = r.uri
@@ -196,9 +198,9 @@ class MCPConnectionManager:
                             mime_type = r.mimeType or "application/octet-stream"
                             
                             # Debug Print for User
-                            print(f"Resource found: {name} ({uri})")
-                            print(f"  > Description: {desc}")
-                            print(f"  > MimeType: {mime_type}")
+                            logger.info(f"Resource found: {name} ({uri})")
+                            logger.info(f"  > Description: {desc}")
+                            logger.info(f"  > MimeType: {mime_type}")
                             
                             all_resources.append({
                                 "uri": uri,
@@ -207,9 +209,9 @@ class MCPConnectionManager:
                                 "mimeType": mime_type,
                                 "source_url": url
                             })
-                        print("---------------------------------------")
+                        logger.info("---------------------------------------")
             except Exception as e:
-                print(f"Error fetching resources from {url}: {e}")
+                logger.info(f"Error fetching resources from {url}: {e}")
         return all_resources
         
     async def load_resource(self, uri: str) -> str:
@@ -257,7 +259,7 @@ class MCPConnectionManager:
                                 "source_url": url
                             })
             except Exception as e:
-                print(f"Error fetching prompts from {url}: {e}")
+                logger.info(f"Error fetching prompts from {url}: {e}")
         return all_prompts
     
     async def get_prompt(self, name: str, arguments: Dict[str, Any] = None) -> Any:
