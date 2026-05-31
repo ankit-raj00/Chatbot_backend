@@ -354,14 +354,14 @@ sequenceDiagram
             CG->>GEMINI: Re-invoke with tool result
         else Text Response
             CG->>CS: on_chat_model_stream SSE events
-            CS-->>FE: "data: {'chunk': '...'} (streamed)"
+            CS-->>FE: data chunk... streamed
         end
     end
 
     CS->>MONGO: Step 8a: Save AI response + tool_steps + input_tokens + output_tokens + cost_usd + model
     CS->>MS: Step 8b: asyncio.create_task(extract_and_store) — NON-BLOCKING
     CS->>REDIS: Step 8c: Invalidate history cache
-    CS-->>FE: "data: {'done': true, 'conversation_id': '...'}"
+    CS-->>FE: data done true, conversation_id
 ```
 
 ### SSE Event Format
@@ -456,8 +456,8 @@ sequenceDiagram
     participant GEMINI as Gemini LLM
     participant HN as hallucination_node
 
-    CLIENT->>RR: "POST /api/v1/rag/chat {question, selected_files}"
-    RR->>RW: "workflow.app.ainvoke({question})"
+    CLIENT->>RR: POST /api/v1/rag/chat question, selected_files
+    RR->>RW: workflow.app.ainvoke question
 
     par Parallel Retrieval
         RW->>PRN: asyncio.gather(...)
@@ -488,8 +488,8 @@ sequenceDiagram
     GEMINI-->>HN: grounded / not grounded
     HN->>RW: final state (hallucination_warning: bool)
 
-    RW-->>RR: "{generation, documents, hallucination_warning}"
-    RR-->>CLIENT: "{answer, sources, hallucination_warning}"
+    RW-->>RR: generation, documents, hallucination_warning
+    RR-->>CLIENT: answer, sources, hallucination_warning
 ```
 
 ### Ingestion Pipeline (Background Queue)
@@ -510,7 +510,7 @@ sequenceDiagram
     FE->>UPR: POST /api/v1/ingest/upload (file)
     UPR->>IJS: create_job(filename, user_id) → job_id
     UPR->>BG: add_task(_run_ingestion_background)
-    UPR-->>FE: "200 {job_id, status: 'queued'} ← INSTANT RESPONSE"
+    UPR-->>FE: 200 job_id, status queued -- INSTANT RESPONSE
 
     Note over BG: Running asynchronously in background
 
@@ -527,7 +527,7 @@ sequenceDiagram
 
     FE->>UPR: GET /api/v1/ingest/job/{job_id} (polling)
     UPR->>IJS: get_job(job_id)
-    IJS-->>UPR: "{status, chunks_count, file_id}"
+    IJS-->>UPR: status, chunks_count, file_id
     UPR-->>FE: job status
 ```
 
@@ -590,14 +590,14 @@ sequenceDiagram
     CS->>MS: asyncio.create_task(extract_and_store(...))
     Note over CS: NON-BLOCKING — chat stream continues
 
-    MS->>GEMINI: "Extract durable facts from this conversation..."
-    GEMINI-->>MS: "[{'topic': 'tech stack', 'content': 'Uses FastAPI'}]"
-    MS->>MONGO: "upsert({user_id}, {memories: [...]}) — merge with existing"
+    MS->>GEMINI: Extract durable facts from this conversation...
+    GEMINI-->>MS: topic tech stack, content Uses FastAPI
+    MS->>MONGO: upsert user_id, memories -- merge with existing
 
     Note over PB: At the START of every chat turn...
     CS->>MONGO: MemoryService.get_user_memories(user_id)
-    MONGO-->>CS: "[{topic, content}, ...]"
-    CS->>PB: "assemble(user_memories=[...])"
+    MONGO-->>CS: topic, content...
+    CS->>PB: assemble user_memories
     PB->>PB: Inject memories into System Prompt
 ```
 
@@ -673,12 +673,12 @@ sequenceDiagram
     participant MW as get_current_user Dependency
     participant MONGO as MongoDB
 
-    FE->>AUTH: "POST email, password"
-    AUTH->>MONGO: "find_one(email)"
+    FE->>AUTH: POST email, password
+    AUTH->>MONGO: find_one email
     MONGO-->>AUTH: user document
     AUTH->>AUTH: bcrypt.verify(password, hash)
-    AUTH->>AUTH: "create_access_token(user_id, email)"
-    AUTH-->>FE: "200 + Set-Cookie: access_token=JWT; HttpOnly; SameSite=Lax"
+    AUTH->>AUTH: create_access_token user_id, email
+    AUTH-->>FE: 200 + Set-Cookie access_token=JWT HttpOnly SameSite=Lax
 
     Note over FE: Cookie auto-sent on all subsequent requests
 
