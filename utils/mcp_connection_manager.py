@@ -1,5 +1,6 @@
 from typing import Dict, Optional, List, Any
 import asyncio
+import time
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_core.tools import BaseTool
 
@@ -22,6 +23,8 @@ class MCPConnectionManager:
             return
         # Store clients: Map URL -> MultiServerMCPClient
         self._clients: Dict[str, MultiServerMCPClient] = {}
+        self._tool_cache: dict[str, tuple[list, float]] = {}   # url -> (tools, timestamp)
+        self._tool_cache_ttl: int = 300                         # 5 minutes
         self._initialized = True
     
     async def connect(self, url: str) -> bool:
@@ -74,6 +77,7 @@ class MCPConnectionManager:
             # Commented out to avoid immediate overhead/failure if lazy is desired.
             
             self._clients[url] = client
+            self.invalidate_tool_cache(url)
             print(f"Successfully registered: {url}")
             return True
             
@@ -84,18 +88,47 @@ class MCPConnectionManager:
     async def get_all_langchain_tools(self) -> List[BaseTool]:
         """
         Get LangChain compatible tools from ALL registered clients.
-        Delegates to MultiServerMCPClient.get_tools().
+        Tools are cached per-server for _tool_cache_ttl seconds.
+        On cache miss: fetches from server. On error: serves stale cache.
         """
         all_tools = []
+        now = time.monotonic()
+
         for url, client in self._clients.items():
+            cached_tools, cached_at = self._tool_cache.get(url, (None, 0.0))
+            cache_age = now - cached_at
+
+            if cached_tools is not None and cache_age < self._tool_cache_ttl:
+                # Cache HIT
+                all_tools.extend(cached_tools)
+                continue
+
+            # Cache MISS — fetch from server
             try:
-                # get_tools() returns list of BaseTool (LangChain native)
                 tools = await client.get_tools()
+                self._tool_cache[url] = (tools, now)
                 all_tools.extend(tools)
+                print(f"MCP tool cache refreshed for {url}: {len(tools)} tools")
             except Exception as e:
                 print(f"Error fetching tools from {url}: {e}")
-                
+                if cached_tools is not None:
+                    # Serve stale cache on error rather than failing
+                    print(f"Serving stale tool cache for {url} ({cache_age:.0f}s old)")
+                    all_tools.extend(cached_tools)
+
         return all_tools
+        
+    def invalidate_tool_cache(self, url: str = None) -> None:
+        """
+        Invalidate the tool cache. Call after connecting a new server
+        or when the user adds/removes tools.
+        url=None invalidates all servers.
+        """
+        if url:
+            self._tool_cache.pop(url, None)
+        else:
+            self._tool_cache.clear()
+        print(f"MCP tool cache invalidated for: {url or 'all servers'}")
         
     async def get_tools_from_server(self, url: str) -> List[BaseTool]:
         """
