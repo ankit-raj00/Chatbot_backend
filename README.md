@@ -46,16 +46,16 @@ The system is designed to run on Render/Vercel in production and gracefully degr
 
 ```mermaid
 graph TD
-    subgraph Client
+    subgraph client [Client]
         FE["React Frontend"]
     end
 
-    subgraph FastAPI Application
+    subgraph fastapi_app [FastAPI Application]
         MW["Middleware Stack\n(CORS · Logging · Rate-Limit · Correlation-ID)"]
         ROUTES["API Routers\n(Auth · Chat · RAG · Ingest · MCP · Tools · User)"]
     end
 
-    subgraph Chat Pipeline
+    subgraph chat_pipeline [Chat Pipeline]
         CC["ChatController\n(HTTP Layer)"]
         CS["ChatService\n(Orchestrator)"]
         HS["HistoryService\n(Redis Cache → MongoDB)"]
@@ -64,7 +64,7 @@ graph TD
         CG["LangGraph: Chat Graph"]
     end
 
-    subgraph Chat Graph Nodes
+    subgraph chat_nodes [Chat Graph Nodes]
         SN["setup_node\n(Load History + Memory)"]
         CM["chat_model_node\n(Gemini LLM + Dynamic Tools)"]
         RT{"route_tools\nConditional Router"}
@@ -72,7 +72,7 @@ graph TD
         MTN["mcp_tool_node\n(External MCP Servers)"]
     end
 
-    subgraph RAG Pipeline
+    subgraph rag_pipeline [RAG Pipeline]
         RW["RAG Workflow\n(LangGraph)"]
         PRN["parallel_retrieve_node\n(Qdrant + Tavily concurrently)"]
         GN["grade_documents\n(Relevance Grader)"]
@@ -80,13 +80,13 @@ graph TD
         HN["hallucination_node\n(Groundedness Check)"]
     end
 
-    subgraph Storage
+    subgraph storage [Storage]
         MONGO[("MongoDB\n(Atlas)\nUsers · Chats · Memory")]
         QDRANT[("Qdrant Cloud\nVector DB")]
         REDIS[("Redis\n(Upstash)\nCache · Jobs · Rate-Limit")]
     end
 
-    subgraph External Services
+    subgraph external [External Services]
         GEMINI["Google Gemini\n(LLM + Embeddings)"]
         LLAMA["LlamaParse Cloud\n(PDF Parsing)"]
         TAVILY["Tavily\n(Web Search)"]
@@ -213,7 +213,6 @@ backend/
 │                              # Protected by require_admin() dependency
 │                              # Aggregates cost/token data from MongoDB
 └── create_admin.py            # One-time script to promote a user to admin
-```
 ```
 
 ---
@@ -355,14 +354,14 @@ sequenceDiagram
             CG->>GEMINI: Re-invoke with tool result
         else Text Response
             CG->>CS: on_chat_model_stream SSE events
-            CS-->>FE: data: {"chunk": "..."} (streamed)
+            CS-->>FE: "data: {'chunk': '...'} (streamed)"
         end
     end
 
-    CS->>MONGO: Step 8a: Save AI response + tool_steps + **input_tokens + output_tokens + cost_usd + model**
+    CS->>MONGO: Step 8a: Save AI response + tool_steps + input_tokens + output_tokens + cost_usd + model
     CS->>MS: Step 8b: asyncio.create_task(extract_and_store) — NON-BLOCKING
     CS->>REDIS: Step 8c: Invalidate history cache
-    CS-->>FE: data: {"done": true, "conversation_id": "..."}
+    CS-->>FE: "data: {'done': true, 'conversation_id': '...'}"
 ```
 
 ### SSE Event Format
@@ -457,8 +456,8 @@ sequenceDiagram
     participant GEMINI as Gemini LLM
     participant HN as hallucination_node
 
-    CLIENT->>RR: POST /api/v1/rag/chat {question, selected_files}
-    RR->>RW: workflow.app.ainvoke({question})
+    CLIENT->>RR: "POST /api/v1/rag/chat {question, selected_files}"
+    RR->>RW: "workflow.app.ainvoke({question})"
 
     par Parallel Retrieval
         RW->>PRN: asyncio.gather(...)
@@ -489,8 +488,8 @@ sequenceDiagram
     GEMINI-->>HN: grounded / not grounded
     HN->>RW: final state (hallucination_warning: bool)
 
-    RW-->>RR: {generation, documents, hallucination_warning}
-    RR-->>CLIENT: {answer, sources, hallucination_warning}
+    RW-->>RR: "{generation, documents, hallucination_warning}"
+    RR-->>CLIENT: "{answer, sources, hallucination_warning}"
 ```
 
 ### Ingestion Pipeline (Background Queue)
@@ -511,7 +510,7 @@ sequenceDiagram
     FE->>UPR: POST /api/v1/ingest/upload (file)
     UPR->>IJS: create_job(filename, user_id) → job_id
     UPR->>BG: add_task(_run_ingestion_background)
-    UPR-->>FE: 200 {job_id, status: "queued"} ← INSTANT RESPONSE
+    UPR-->>FE: "200 {job_id, status: 'queued'} ← INSTANT RESPONSE"
 
     Note over BG: Running asynchronously in background
 
@@ -528,7 +527,7 @@ sequenceDiagram
 
     FE->>UPR: GET /api/v1/ingest/job/{job_id} (polling)
     UPR->>IJS: get_job(job_id)
-    IJS-->>UPR: {status, chunks_count, file_id}
+    IJS-->>UPR: "{status, chunks_count, file_id}"
     UPR-->>FE: job status
 ```
 
@@ -542,14 +541,14 @@ AgentX implements the open-source [Model Context Protocol](https://modelcontextp
 
 ```mermaid
 graph LR
-    subgraph AgentX Backend
+    subgraph agentx [AgentX Backend]
         CM["chat_model_node\n(Gemini LLM)"]
         MCPMgr["MCPConnectionManager\n(Singleton)"]
         CACHE["Tool Cache\n(5-min TTL)"]
         MTN["mcp_tool_node"]
     end
 
-    subgraph MCP Servers (External)
+    subgraph external [MCP Servers External]
         GD["Google Drive MCP Server\n(SSE/HTTP)"]
         FS["File System MCP Server\n(stdio)"]
         CUSTOM["Custom MCP Server\n(HTTP/SSE)"]
@@ -592,13 +591,13 @@ sequenceDiagram
     Note over CS: NON-BLOCKING — chat stream continues
 
     MS->>GEMINI: "Extract durable facts from this conversation..."
-    GEMINI-->>MS: [{"topic": "tech stack", "content": "Uses FastAPI"}]
-    MS->>MONGO: upsert({user_id}, {memories: [...]}) — merge with existing
+    GEMINI-->>MS: "[{'topic': 'tech stack', 'content': 'Uses FastAPI'}]"
+    MS->>MONGO: "upsert({user_id}, {memories: [...]}) — merge with existing"
 
     Note over PB: At the START of every chat turn...
     CS->>MONGO: MemoryService.get_user_memories(user_id)
-    MONGO-->>CS: [{topic, content}, ...]
-    CS->>PB: assemble(user_memories=[...])
+    MONGO-->>CS: "[{topic, content}, ...]"
+    CS->>PB: "assemble(user_memories=[...])"
     PB->>PB: Inject memories into System Prompt
 ```
 
@@ -674,12 +673,12 @@ sequenceDiagram
     participant MW as get_current_user Dependency
     participant MONGO as MongoDB
 
-    FE->>AUTH: POST {email, password}
-    AUTH->>MONGO: find_one({email})
+    FE->>AUTH: "POST email, password"
+    AUTH->>MONGO: "find_one(email)"
     MONGO-->>AUTH: user document
     AUTH->>AUTH: bcrypt.verify(password, hash)
-    AUTH->>AUTH: create_access_token({user_id, email})
-    AUTH-->>FE: 200 + Set-Cookie: access_token=JWT; HttpOnly; SameSite=Lax
+    AUTH->>AUTH: "create_access_token(user_id, email)"
+    AUTH-->>FE: "200 + Set-Cookie: access_token=JWT; HttpOnly; SameSite=Lax"
 
     Note over FE: Cookie auto-sent on all subsequent requests
 
