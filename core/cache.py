@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 # Module-level pool — created once on startup, shared across all requests
 _pool: Optional[ConnectionPool] = None
 _client: Optional[Redis] = None
+_fallback_cache: dict = {}
 
 
 async def init_redis() -> None:
@@ -50,6 +51,8 @@ async def init_redis() -> None:
         logger.info(f"Redis connected: {redis_url}")
     except Exception as e:
         logger.error(f"Redis connection failed: {e}")
+        _client = None
+        _pool = None
         raise RuntimeError(
             f"Cannot connect to Redis at {redis_url}. "
             "Set REDIS_URL in your .env file. "
@@ -70,28 +73,39 @@ async def close_redis() -> None:
     logger.info("Redis connection closed")
 
 
-async def get_redis() -> Redis:
+async def get_redis() -> Optional[Redis]:
     """
-    Returns the shared Redis client.
-    Raises RuntimeError if init_redis() was never called.
+    Returns the shared Redis client or None if not initialized.
     """
-    if _client is None:
-        raise RuntimeError("Redis not initialized. Call init_redis() at startup.")
     return _client
 
 
 # ─── Convenience helpers ──────────────────────────────────────────────────────
 
 async def cache_set(key: str, value: Any, ttl_seconds: int = 300) -> None:
-    """Serialize value to JSON and store with TTL."""
-    r = await get_redis()
-    await r.set(key, json.dumps(value), ex=ttl_seconds)
+    """Serialize value to JSON and store with TTL or fallback to memory."""
+    if _client is None:
+        _fallback_cache[key] = json.dumps(value)
+        return
+    try:
+        await _client.set(key, json.dumps(value), ex=ttl_seconds)
+    except Exception as e:
+        logger.warning(f"Redis set failed, using fallback: {e}")
+        _fallback_cache[key] = json.dumps(value)
 
 
 async def cache_get(key: str) -> Optional[Any]:
-    """Retrieve and deserialize a JSON value. Returns None if not found."""
-    r = await get_redis()
-    raw = await r.get(key)
+    """Retrieve and deserialize a JSON value from Redis or fallback. Returns None if not found."""
+    raw = None
+    if _client is None:
+        raw = _fallback_cache.get(key)
+    else:
+        try:
+            raw = await _client.get(key)
+        except Exception as e:
+            logger.warning(f"Redis get failed, using fallback: {e}")
+            raw = _fallback_cache.get(key)
+            
     if raw is None:
         return None
     try:
@@ -99,14 +113,24 @@ async def cache_get(key: str) -> Optional[Any]:
     except (json.JSONDecodeError, TypeError):
         return raw   # return raw string if not valid JSON
 
-
 async def cache_delete(key: str) -> None:
-    """Delete a cache key."""
-    r = await get_redis()
-    await r.delete(key)
+    """Delete a key from Redis or fallback cache."""
+    if _client is None:
+        _fallback_cache.pop(key, None)
+        return
+    try:
+        await _client.delete(key)
+    except Exception as e:
+        logger.warning(f"Redis delete failed, using fallback: {e}")
+        _fallback_cache.pop(key, None)
 
 
 async def cache_exists(key: str) -> bool:
-    """Returns True if key exists in Redis."""
-    r = await get_redis()
-    return await r.exists(key) > 0
+    """Returns True if key exists in Redis or fallback cache."""
+    if _client is None:
+        return key in _fallback_cache
+    try:
+        return await _client.exists(key) > 0
+    except Exception as e:
+        logger.warning(f"Redis exists failed, using fallback: {e}")
+        return key in _fallback_cache

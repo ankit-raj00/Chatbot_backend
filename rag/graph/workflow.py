@@ -8,7 +8,8 @@ from rag.graph.nodes.hallucination_node import HallucinationNode
 from rag.graph.nodes.web_search_node import WebSearchNode
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import structlog
+logger = structlog.get_logger(__name__)
 
 class RAGWorkflow:
     """

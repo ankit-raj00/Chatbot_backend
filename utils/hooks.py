@@ -27,7 +27,8 @@ import time
 import logging
 from typing import Callable, Awaitable, Any
 
-logger = logging.getLogger(__name__)
+import structlog
+logger = structlog.get_logger(__name__)
 
 # Registered hooks — populated via decorators
 _pre_tool_hooks: list[Callable] = []

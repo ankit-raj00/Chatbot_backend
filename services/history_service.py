@@ -20,7 +20,8 @@ from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from core.database import messages_collection
 from core.cache import cache_get, cache_set, cache_delete
 
-logger = logging.getLogger(__name__)
+import structlog
+logger = structlog.get_logger(__name__)
 
 HISTORY_CACHE_TTL = 1800   # 30 minutes
 HISTORY_CACHE_PREFIX = "history"

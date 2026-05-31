@@ -26,7 +26,8 @@ from services.memory_service import MemoryService
 from graph.builder import chat_graph
 from utils.mcp_connection_manager import mcp_manager
 
-logger = logging.getLogger(__name__)
+import structlog
+logger = structlog.get_logger(__name__)
 
 
 class ChatService:
