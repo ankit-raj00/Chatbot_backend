@@ -1,6 +1,8 @@
 # AgentX Backend — Complete Technical Documentation
 
 > **Production-grade Agentic AI Backend** | FastAPI · LangGraph · Google Gemini · Qdrant · MongoDB · Redis · MCP
+> 
+> **New**: Dual-layer observability (LangSmith trace + native cost analytics), Admin Dashboard with real per-token cost tracking
 
 ---
 
@@ -16,11 +18,12 @@
 9. [Persistent Memory Bank](#9-persistent-memory-bank)
 10. [Redis: Caching, Rate-Limiting & Background Jobs](#10-redis-caching-rate-limiting--background-jobs)
 11. [Authentication & Security](#11-authentication--security)
-12. [Structured Logging & Observability](#12-structured-logging--observability)
-13. [Hook System (Middleware for Tool Calls)](#13-hook-system-middleware-for-tool-calls)
-14. [Database Schema (MongoDB)](#14-database-schema-mongodb)
-15. [Environment Variables Reference](#15-environment-variables-reference)
-16. [Running Locally & E2E Testing](#16-running-locally--e2e-testing)
+12. [Dual-Layer Observability: LangSmith + Native Cost Analytics](#12-dual-layer-observability-langsmith--native-cost-analytics)
+13. [Admin Analytics Dashboard](#13-admin-analytics-dashboard)
+14. [Hook System (Middleware for Tool Calls)](#14-hook-system-middleware-for-tool-calls)
+15. [Database Schema (MongoDB)](#15-database-schema-mongodb)
+16. [Environment Variables Reference](#16-environment-variables-reference)
+17. [Running Locally & E2E Testing](#17-running-locally--e2e-testing)
 
 ---
 
@@ -138,6 +141,7 @@ backend/
 │   ├── mcp_server_routes.py   # GET/POST/DELETE /api/mcp/servers
 │   ├── tool_routes.py         # GET /api/tools, PUT /api/tools/{id}/toggle
 │   ├── user_routes.py         # GET/DELETE /api/users/memories
+│   ├── admin_routes.py        # GET /admin/* — 7 cost analytics endpoints (admin-only)
 │   ├── oauth_routes.py        # Google OAuth flow endpoints
 │   └── auth_status_routes.py  # GET /api/auth/status
 │
@@ -199,8 +203,17 @@ backend/
 │   └── hooks.py               # Decorator-based pre/post tool call hook system
 │
 └── models/                    # Pydantic schemas
-    ├── user.py                # UserCreate, UserLogin schemas
+    ├── user.py                # UserCreate, UserLogin, UserResponse (with is_admin field)
     └── ...
+
+### Admin-specific files
+```text
+backend/
+├── routes/admin_routes.py     # 7 analytics endpoints (GET /admin/*)
+│                              # Protected by require_admin() dependency
+│                              # Aggregates cost/token data from MongoDB
+└── create_admin.py            # One-time script to promote a user to admin
+```
 ```
 
 ---
@@ -255,6 +268,8 @@ Request enters →
 
 ## 5. API Routes Reference
 
+### Standard Routes
+
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET | `/` | ❌ | Root health ping |
@@ -262,7 +277,7 @@ Request enters →
 | POST | `/auth/signup` | ❌ | Register new user, sets JWT cookie |
 | POST | `/auth/login` | ❌ | Authenticate, sets JWT cookie |
 | POST | `/auth/logout` | ❌ | Clears JWT cookie |
-| GET | `/auth/me` | ✅ | Returns current user info |
+| GET | `/auth/me` | ✅ | Returns current user info (includes `is_admin`) |
 | POST | `/chat/stream` | ✅ | **Main Chat SSE endpoint** (rate-limited: 20/min) |
 | GET | `/conversations` | ✅ | List user's conversations |
 | GET | `/conversations/{id}/messages` | ✅ | Get messages in a conversation |
@@ -280,6 +295,23 @@ Request enters →
 | PUT | `/api/tools/{id}/toggle` | ✅ | Enable/disable a native tool |
 | GET | `/api/users/memories` | ✅ | Get user's persistent memories |
 | DELETE | `/api/users/memories` | ✅ | Clear all user memories |
+
+### Admin Routes (`is_admin: true` required)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/admin/overview` | Platform-wide totals: users, messages, tokens, cost |
+| GET | `/admin/users` | Paginated user list with per-user token & cost aggregates |
+| GET | `/admin/users/{user_id}/sessions` | All conversations for a user with per-session cost |
+| GET | `/admin/users/{user_id}/sessions/{conv_id}` | Turn-by-turn detail with per-message token counts |
+| GET | `/admin/usage/daily` | AI response volume + cost per day (last 30 days) |
+| GET | `/admin/usage/models` | Token & cost breakdown per Gemini model variant |
+| GET | `/admin/usage/tools` | Tool call frequency ranking |
+
+> ⚠️ Admin routes return **HTTP 403** for non-admin users. Promote a user via MongoDB:
+> ```js
+> db.users.updateOne({ email: "you@example.com" }, { $set: { is_admin: true } })
+> ```
 
 ---
 
@@ -327,7 +359,7 @@ sequenceDiagram
         end
     end
 
-    CS->>MONGO: Step 8a: Save AI response + tool_steps
+    CS->>MONGO: Step 8a: Save AI response + tool_steps + **input_tokens + output_tokens + cost_usd + model**
     CS->>MS: Step 8b: asyncio.create_task(extract_and_store) — NON-BLOCKING
     CS->>REDIS: Step 8c: Invalidate history cache
     CS-->>FE: data: {"done": true, "conversation_id": "..."}
@@ -669,22 +701,29 @@ sequenceDiagram
 
 ---
 
-## 12. Structured Logging & Observability
+## 12. Dual-Layer Observability: LangSmith + Native Cost Analytics
 
-Every request in AgentX is fully traceable through two complementary systems.
+AgentX has **two complementary observability layers** that work simultaneously — each covering what the other cannot:
 
-### Structlog (Per-Request Correlation IDs)
-`CorrelationIdMiddleware` injects a unique `X-Request-ID` UUID into every request. All downstream logs — even from deep inside LangGraph nodes — automatically carry this ID.
-
-Example log output (JSON format, rendered here as readable):
 ```
-2026-05-31T09:57:10Z [info] http.request method=POST path=/api/v1/rag/chat
-    request_id=bca8b9ea-da64-46f8-b902 status=200 duration_ms=15641.0
-2026-05-31T09:57:55Z [info] Received RAG query: "What is the main goal?"
-    method=POST path=/api/v1/rag/chat request_id=bca8b9ea-da64-46f8-b902
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        Every Chat Request                               │
+├───────────────────────┬─────────────────────────────────────────────────┤
+│   LangSmith Tracing   │        Native Token + Cost Tracking             │
+│   (External SaaS)     │        (Stored in YOUR MongoDB)                 │
+├───────────────────────┼─────────────────────────────────────────────────┤
+│ ✅ Visual graph trace │ ✅ Per-message token counts (exact)              │
+│ ✅ Full prompt text   │ ✅ Per-turn USD cost                             │
+│ ✅ Latency per node   │ ✅ Per-user aggregate spend                      │
+│ ✅ Debugging / replay │ ✅ Per-session aggregate spend                   │
+│ ❌ No per-user cost   │ ✅ Admin dashboard with drill-down               │
+│ ❌ SaaS dependency    │ ✅ No external dependency                        │
+│ ❌ Data leaves system │ ✅ Data stays in your MongoDB                    │
+└───────────────────────┴─────────────────────────────────────────────────┘
 ```
 
-### LangSmith (LLM Execution Tracing)
+### Layer 1 — LangSmith (External Tracing)
+
 When `LANGCHAIN_TRACING_V2=true`, every LangGraph run is automatically traced:
 - Visual graph of node execution order and timing
 - Full prompts sent to Gemini (tokens, temperature, model)
@@ -694,9 +733,133 @@ When `LANGCHAIN_TRACING_V2=true`, every LangGraph run is automatically traced:
 
 Enable with: `LANGCHAIN_API_KEY=lsv2_...` and `LANGCHAIN_PROJECT="AgentX"`
 
+### Layer 2 — Native Cost Tracking (Built-In)
+
+This is the **primary cost accounting system** — it captures real token usage directly from the Gemini API response and stores it permanently in MongoDB.
+
+#### How it works (the technical detail)
+
+The key insight is that `astream_events` must be called with **`version="v2"`**. With `v1` (deprecated), events from LLM calls *inside* LangGraph nodes are swallowed and never surface. With `v2`, they bubble up correctly with `metadata.langgraph_node` populated:
+
+```python
+# In chat_service.py — the exact pattern used:
+async for event in chat_graph.astream_events(graph_input, version="v2", config=config):
+    event_type = event.get("event")
+    # v2 gives us the node name — filter to avoid double-counting on tool loops
+    node_name  = event.get("metadata", {}).get("langgraph_node", "")
+
+    elif event_type == "on_chat_model_end" and node_name == "chat_model":
+        usage = event["data"]["output"].usage_metadata
+        # usage = {"input_tokens": 523, "output_tokens": 148, "total_tokens": 671}
+        total_input_tokens  += usage.get("input_tokens", 0)
+        total_output_tokens += usage.get("output_tokens", 0)
+```
+
+> **Why `node_name == "chat_model"` filter?**
+> When the LLM loops back after a tool call, `on_chat_model_end` fires multiple times.
+> Without the node filter, tokens would be double-counted per tool round-trip.
+
+#### Pricing constants (Gemini 2.5 Flash)
+
+```python
+INPUT_PRICE_PER_TOKEN  = 0.075 / 1_000_000   # $0.075 per 1M input tokens
+OUTPUT_PRICE_PER_TOKEN = 0.30  / 1_000_000   # $0.30  per 1M output tokens
+cost_usd = total_input_tokens * INPUT_PRICE_PER_TOKEN + total_output_tokens * OUTPUT_PRICE_PER_TOKEN
+```
+
+#### Saved to MongoDB on every AI response
+
+```json
+{
+  "role": "model",
+  "content": "...",
+  "model": "gemini-2.5-flash",
+  "input_tokens": 523,
+  "output_tokens": 148,
+  "cost_usd": 0.00005393,
+  "tool_steps": [...],
+  "timestamp": "2026-05-31T..."
+}
+```
+
+### Structlog (Per-Request Correlation IDs)
+
+`CorrelationIdMiddleware` injects a unique `X-Request-ID` UUID into every request. All downstream logs — even from deep inside LangGraph nodes — automatically carry this ID.
+
+```
+2026-05-31T09:57:10Z [info] http.request method=POST path=/chat/stream
+    request_id=bca8b9ea status=200 duration_ms=3241.0
+2026-05-31T09:57:10Z [info] token.usage user_id=64abc... conversation_id=...
+    model=gemini-2.5-flash input_tokens=523 output_tokens=148
+```
+
 ---
 
-## 13. Hook System (Middleware for Tool Calls)
+## 13. Admin Analytics Dashboard
+
+The admin system gives platform operators a full **drill-down cost analytics dashboard** with data sourced from the native tracking layer (Layer 2 above).
+
+### Access Control
+
+All `/admin/*` routes are protected by the `require_admin()` FastAPI dependency:
+
+```python
+async def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    if not current_user.get("is_admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return current_user
+```
+
+The `is_admin` field lives on the `users` document. Promote a user once via MongoDB:
+```js
+db.users.updateOne({ email: "you@example.com" }, { $set: { is_admin: true } })
+```
+Or run the helper script: `python create_admin.py`
+
+### Dashboard Drill-Down Hierarchy
+
+```
+/admin                        ← Platform overview cards + charts
+  └── /admin/users            ← All users table (cost per user)
+        └── /admin/users/{id}/sessions        ← All sessions for one user
+              └── /admin/users/{id}/sessions/{conv_id}  ← Turn-by-turn breakdown
+```
+
+### Drill-Down Example
+
+```mermaid
+flowchart TD
+    A["🖥️ /admin\nOverview: 42 users · $0.0012 total"]
+    A --> B["👤 /admin/users\nAll users table\nName · Sessions · Input Tokens · Cost"]
+    B --> C["🗂️ /admin/users/:id/sessions\nAll sessions for Alice\nTitle · Date · Turns · Cost"]
+    C --> D["💬 /admin/users/:id/sessions/:convId\nTurn-by-turn detail\nUser msg | AI msg (523 in · 148 out · $0.000054)"]
+```
+
+### Available Endpoints & What They Return
+
+| Endpoint | MongoDB Aggregation | Returns |
+|---|---|---|
+| `GET /admin/overview` | `$group` over all model messages | Total users, messages, tokens, cost |
+| `GET /admin/users` | Per-user `$group` + conv count | Name, email, sessions, AI turns, cost |
+| `GET /admin/users/{id}/sessions` | Per-conversation `$group` | Title, turns, input/output tokens, cost |
+| `GET /admin/users/{id}/sessions/{cid}` | Raw find + sort | All messages with token fields |
+| `GET /admin/usage/daily` | `$dayOfMonth` group (30 days) | Messages + cost per day |
+| `GET /admin/usage/models` | `$group` by `model` field | Count, cost, tokens per model |
+| `GET /admin/usage/tools` | `$unwind tool_steps` + `$group` | Top tools by call count |
+
+### Frontend Pages
+
+| Route | Component | Purpose |
+|---|---|---|
+| `/admin` | `AdminDashboard.jsx` | Overview cards, line chart, bar charts, users table |
+| `/admin/users/:userId` | `AdminUserPage.jsx` | Session list with cost per session |
+| `/admin/users/:userId/sessions/:convId` | `AdminSessionPage.jsx` | Turn-by-turn detail with expandable messages |
+
+All admin frontend routes are wrapped in `<AdminRoute>` which checks `user.is_admin` from React context and redirects non-admins to `/chat`.
+
+---
+
+## 14. Hook System (Middleware for Tool Calls)
 
 `utils/hooks.py` implements a **decorator-based pre/post hook system** for all tool calls — both native and MCP.
 
@@ -717,7 +880,7 @@ Every tool execution is also wrapped in a **`ToolTimer`** context manager that m
 
 ---
 
-## 14. Database Schema (MongoDB)
+## 15. Database Schema (MongoDB)
 
 ### `users` collection
 ```json
@@ -726,6 +889,7 @@ Every tool execution is also wrapped in a **`ToolTimer`** context manager that m
   "email": "user@example.com",       // unique index
   "name": "John Doe",
   "password": "$2b$12$...",           // bcrypt hash
+  "is_admin": false,                  // true → access to /admin/* routes
   "created_at": "ISODate",
   "updated_at": "ISODate"
 }
@@ -755,9 +919,16 @@ Every tool execution is also wrapped in a **`ToolTimer`** context manager that m
   "tool_steps": [                     // only on model messages
     {"name": "tavily_search", "args": {...}, "result": "...", "status": "completed"}
   ],
+  // ── Cost tracking fields (model messages only) ──
+  "model": "gemini-2.5-flash",        // which model generated this response
+  "input_tokens": 523,                // exact count from Gemini usage_metadata
+  "output_tokens": 148,               // exact count from Gemini usage_metadata
+  "cost_usd": 0.00005393,             // calculated: tokens × per-token price
   "timestamp": "ISODate"
 }
 ```
+
+> **How token counts are captured**: The `on_chat_model_end` event from `astream_events(version="v2")` exposes `output.usage_metadata`. We filter by `metadata.langgraph_node == "chat_model"` to avoid double-counting on tool-call loops.
 
 ### `tools` collection
 ```json
@@ -787,7 +958,7 @@ Every tool execution is also wrapped in a **`ToolTimer`** context manager that m
 
 ---
 
-## 15. Environment Variables Reference
+## 16. Environment Variables Reference
 
 | Variable | Required | Description |
 |----------|----------|-------------|
@@ -818,7 +989,7 @@ Every tool execution is also wrapped in a **`ToolTimer`** context manager that m
 
 ---
 
-## 16. Running Locally & E2E Testing
+## 17. Running Locally & E2E Testing
 
 ### Start the backend
 ```bash

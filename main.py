@@ -34,6 +34,7 @@ from routes.auth_status_routes import router as auth_status_router
 from routes.user_routes import router as user_router
 from routes.upload_routes import router as upload_router
 from routes.rag_routes import router as rag_router
+from routes.admin_routes import router as admin_router
 
 from contextlib import asynccontextmanager
 
@@ -261,6 +262,7 @@ app.include_router(auth_status_router)
 app.include_router(user_router)
 app.include_router(upload_router)
 app.include_router(rag_router)
+app.include_router(admin_router)
 
 # Attach middlewares
 app.add_middleware(CorrelationIdMiddleware)
