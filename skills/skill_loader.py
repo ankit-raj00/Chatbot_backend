@@ -133,7 +133,17 @@ async def get_relevant_skill_for_message(
                 if agent_type and skill_agent and skill_agent != agent_type:
                     continue
                 triggers = (meta.get("metadata") or {}).get("triggers", [])
-                if any(t.lower() in message_lower for t in triggers):
+                
+                # Check if all words in ANY trigger are present in the message
+                message_words = set(message_lower.split())
+                is_match = False
+                for t in triggers:
+                    trigger_words = set(t.lower().split())
+                    if trigger_words.issubset(message_words):
+                        is_match = True
+                        break
+
+                if is_match:
                     body = re.sub(r"^---\n.*?\n---\n", "", content, flags=re.DOTALL).strip()
                     logger.info(f"skill_loader.triggered skill={skill_dir.name} agent={agent_type}")
                     return body, skill_dir.name
@@ -153,7 +163,16 @@ async def get_relevant_skill_for_message(
                 if agent_type and skill_agent and skill_agent != agent_type:
                     continue
                 triggers = doc.get("triggers", [])
-                if any(t.lower() in message_lower for t in triggers):
+                
+                message_words = set(message_lower.split())
+                is_match = False
+                for t in triggers:
+                    trigger_words = set(t.lower().split())
+                    if trigger_words.issubset(message_words):
+                        is_match = True
+                        break
+
+                if is_match:
                     content = doc.get("skill_content", "")
                     body = re.sub(r"^---\n.*?\n---\n", "", content, flags=re.DOTALL).strip()
                     logger.info(f"skill_loader.user_skill_triggered skill={doc['skill_name']}")

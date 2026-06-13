@@ -11,7 +11,7 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-WORKSPACE_ROOT   = Path(os.getenv("WORKSPACE_ROOT", "/tmp/agentx_workspace"))
+from utils.workspace import WORKSPACE_ROOT
 MAX_AGE_HOURS    = int(os.getenv("WORKSPACE_CLEANUP_HOURS", "24"))
 INTERVAL_SECONDS = 3600  # run every hour
 

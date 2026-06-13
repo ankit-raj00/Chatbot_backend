@@ -1,0 +1,10 @@
+Collecting fpdf2
+  Downloading fpdf2-2.8.7-py3-none-any.whl.metadata (81 kB)
+Collecting defusedxml (from fpdf2)
+  Using cached defusedxml-0.7.1-py2.py3-none-any.whl.metadata (32 kB)
+Requirement already satisfied: Pillow!=9.2.*,>=8.3.2 in d:\gemini playgroun\vscodeground\chatbot\backend\venv\lib\site-packages (from fpdf2) (12.2.0)
+Requirement already satisfied: fonttools>=4.34.0 in d:\gemini playgroun\vscodeground\chatbot\backend\venv\lib\site-packages (from fpdf2) (4.63.0)
+Downloading fpdf2-2.8.7-py3-none-any.whl (327 kB)
+Using cached defusedxml-0.7.1-py2.py3-none-any.whl (25 kB)
+Installing collected packages: defusedxml, fpdf2
+Successfully installed defusedxml-0.7.1 fpdf2-2.8.7

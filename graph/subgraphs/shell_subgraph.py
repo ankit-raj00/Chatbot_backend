@@ -22,41 +22,11 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 MAX_ITER = 8
-_DEFAULT_WS = str(Path.home() / "agentx_workspace")
+from utils.workspace import workspace_for as _workspace_for
+from utils.code_executor import run_shell as _run_shell
 
-BLOCKED = [
-    "rm -rf /", "rm -rf ~", "sudo rm", ":(){:|:&};:", "mkfs",
-    "dd if=/dev/zero", "chmod -R 777 /", "> /dev/sda",
-    "curl | sh", "wget | sh", "curl | bash", "wget | bash",
-]
-
-
-def _workspace_for(user_id: str = "anonymous") -> Path:
-    ws = Path(os.getenv("WORKSPACE_ROOT", _DEFAULT_WS)) / user_id
-    ws.mkdir(parents=True, exist_ok=True)
-    return ws
-
-
-def _is_blocked(cmd: str) -> bool:
-    cl = cmd.lower()
-    return any(b in cl for b in BLOCKED)
-
-
-async def _run_shell(cmd: str, cwd: str) -> str:
-    if _is_blocked(cmd):
-        return "BLOCKED: Command contains a forbidden pattern."
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            cmd, cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=30)
-        return ((out.decode("utf-8", "replace") + err.decode("utf-8", "replace")).strip() or "(no output)")[:8000]
-    except asyncio.TimeoutError:
-        return "TIMEOUT: Command exceeded 30s."
-    except Exception as e:
-        return f"ERROR: {e}"
+# Backward compatibility alias for tests
+_run_cmd = _run_shell
 
 
 def _extract_shell_blocks(text: str) -> list[str]:
@@ -134,7 +104,11 @@ async def shell_subgraph(state: SupervisorState, config: RunnableConfig) -> dict
             for cmd_block in shell_blocks:
                 # Run each line as separate command or whole block
                 cmd = cmd_block.strip()
-                output = await _run_shell(cmd, cwd)
+                output = await _run_shell(cmd, cwd, blocked_patterns=[
+    "rm -rf /", "rm -rf ~", "sudo rm", ":(){:|:&};:", "mkfs",
+    "dd if=/dev/zero", "chmod -R 777 /", "> /dev/sda",
+    "curl | sh", "wget | sh", "curl | bash", "wget | bash",
+])
                 logger.info(f"shell_subgraph.exec iter={iteration} cmd={cmd[:60]!r} out={output[:80]!r}")
 
                 if any(e in output for e in ["ERROR:", "BLOCKED:", "TIMEOUT:", "command not found", "is not recognized"]):
