@@ -26,19 +26,19 @@ async def get_agent_status(
     current_user: dict = Depends(get_current_user),
 ):
     """Get the current state of an agent thread (for interrupt/resume UX)."""
-    from graph.supervisor import get_supervisor
-    supervisor = await get_supervisor()
+    from graph.builder import get_agent_graph
+    agent_graph = await get_agent_graph()
 
     try:
         config    = {"configurable": {"thread_id": thread_id}}
-        state     = await supervisor.aget_state(config)
+        state     = await agent_graph.aget_state(config)
         if not state:
             raise HTTPException(status_code=404, detail="Thread not found")
 
         values = state.values if hasattr(state, "values") else {}
         return {
             "thread_id":   thread_id,
-            "agent":       values.get("agent", ""),
+            "agent":       "agentx",
             "interrupted": bool(state.next),
             "next_node":   list(state.next) if state.next else [],
         }
@@ -55,22 +55,22 @@ async def resume_agent(
     current_user: dict = Depends(get_current_user),
 ):
     """Resume a paused agent after human approval."""
-    from graph.supervisor import get_supervisor
+    from graph.builder import get_agent_graph
     from langchain_core.messages import HumanMessage
 
-    supervisor = await get_supervisor()
+    agent_graph = await get_agent_graph()
     config     = {"configurable": {"thread_id": thread_id}}
 
     try:
         if not payload.approved:
             # Inject a cancellation message and let agent wrap up
-            await supervisor.aupdate_state(
+            await agent_graph.aupdate_state(
                 config,
                 {"messages": [HumanMessage(content="[USER CANCELLED] Do not execute the command.")]},
             )
         else:
             if payload.feedback:
-                await supervisor.aupdate_state(
+                await agent_graph.aupdate_state(
                     config,
                     {"messages": [HumanMessage(content=f"[USER APPROVED] {payload.feedback}")]},
                 )
@@ -86,13 +86,13 @@ async def cancel_agent(
     current_user: dict = Depends(get_current_user),
 ):
     """Cancel a paused agent thread."""
-    from graph.supervisor import get_supervisor
+    from graph.builder import get_agent_graph
     from langchain_core.messages import HumanMessage
 
-    supervisor = await get_supervisor()
+    agent_graph = await get_agent_graph()
     config     = {"configurable": {"thread_id": thread_id}}
     try:
-        await supervisor.aupdate_state(
+        await agent_graph.aupdate_state(
             config,
             {"messages": [HumanMessage(content="[CANCELLED]")]},
         )

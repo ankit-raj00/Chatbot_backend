@@ -142,13 +142,13 @@ async def lifespan(app: FastAPI):
     else:
         print("ℹ️  LangSmith tracing disabled (set LANGCHAIN_TRACING_V2=true to enable)")
 
-    # ── Supervisor graph init ──────────────────────────────────
+    # ── Agent graph init ──────────────────────────────────
     try:
-        from graph.supervisor import get_supervisor
-        await get_supervisor()   # warm up — creates Redis checkpointer connection
-        print("✅ Supervisor graph initialized")
+        from graph.builder import get_agent_graph
+        await get_agent_graph()   # warm up — creates Redis checkpointer connection
+        print("✅ Agent graph initialized")
     except Exception as e:
-        print(f"⚠️  Supervisor init warning: {e}")
+        print(f"⚠️  Agent init warning: {e}")
 
     # ── Workspace cleanup background task ─────────────────────
     import asyncio
@@ -166,11 +166,11 @@ async def lifespan(app: FastAPI):
     from utils.mcp_connection_manager import mcp_manager
     await mcp_manager.disconnect_all()
 
-    # Shutdown: close supervisor checkpointer
+    # Shutdown: close agent checkpointer
     try:
-        from graph.supervisor import close_supervisor
-        await close_supervisor()
-        print("✅ Supervisor checkpointer closed")
+        from graph.builder import close_agent_graph
+        await close_agent_graph()
+        print("✅ Agent checkpointer closed")
     except Exception:
         pass
 

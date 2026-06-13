@@ -24,7 +24,8 @@ from core.database import messages_collection, conversations_collection
 from services.history_service import HistoryService
 from services.prompt_builder import PromptBuilder
 from services.memory_service import MemoryService
-from graph.supervisor import get_supervisor, SupervisorState
+from graph.builder import get_agent_graph
+from graph.nodes.common import ChatState
 from utils.mcp_connection_manager import mcp_manager
 
 import structlog
@@ -136,16 +137,12 @@ class ChatService:
                 content=current_content if files_content_parts else message
             )
 
-            supervisor_input: SupervisorState = {
+            agent_input: ChatState = {
                 "messages":        [SystemMessage(content=system_prompt)] + history + [input_message],
                 "user_id":         user_id,
                 "conversation_id": conversation_id,
-                "agent":           "",
-                "model":           model,
                 "enabled_tools":   enabled_tools,
                 "selected_files":  selected_files,
-                "skill_body":      "",
-                "final_response":  "",
             }
 
             config = {
@@ -163,7 +160,8 @@ class ChatService:
                     "enabled_tools": enabled_tools,
                     "user_id":       user_id,
                     "model":         model,
-                }
+                },
+                "recursion_limit": 30,
             }
 
             # ── Step 7: Stream supervisor events ────────────────────────
@@ -173,54 +171,23 @@ class ChatService:
             artifacts           = []
             total_input_tokens  = 0
             total_output_tokens = 0
-            routed_agent        = ""
+            routed_agent        = "agentx"
 
             # Gemini 2.5 Flash pricing (USD per token)
             INPUT_PRICE_PER_TOKEN  = 0.075 / 1_000_000
             OUTPUT_PRICE_PER_TOKEN = 0.30  / 1_000_000
 
-            supervisor = await get_supervisor()
+            agent_graph = await get_agent_graph()
 
-            async for event in supervisor.astream_events(supervisor_input, version="v2", config=config):
+            async for event in agent_graph.astream_events(agent_input, version="v2", config=config):
                 if not isinstance(event, dict):
                     continue
 
                 event_type = event.get("event")
                 node_name  = event.get("metadata", {}).get("langgraph_node", "")
 
-                # Emit intent classification (which agent was chosen)
-                if event_type == "on_chain_end" and node_name == "intent_classifier":
-                    output = event.get("data", {}).get("output", {})
-                    if not isinstance(output, dict):
-                        continue
-                        
-                    routed_agent = output.get("agent", "")
-                    if routed_agent:
-                        yield f"data: {json.dumps({'agent': routed_agent})}\n\n"
-                    
-                    skill_name = output.get("skill_name")
-                    skill_body = output.get("skill_body")
-                    if skill_name and skill_body:
-                        skill_data = {'name': skill_name, 'content': skill_body}
-                        skills.append(skill_data)
-                        yield f"data: {json.dumps({'skill_used': skill_data})}\n\n"
-
-                # Capture final text from agent nodes when no chunks were streamed
-                # (e.g. document agent uses execute_code → the final summary text comes from on_chain_end)
-                elif event_type == "on_chain_end" and node_name in {"document", "code", "shell", "data", "vision", "chat", "rag"}:
-                    output = event.get("data", {}).get("output", {})
-                    if isinstance(output, dict):
-                        final_text = output.get("final_response", "")
-                        if final_text and not full_response:
-                            # Nothing was streamed yet — emit the full text now
-                            full_response = final_text
-                            yield f"data: {json.dumps({'chunk': final_text})}\n\n"
-
                 # Stream text chunks from any subgraph's chat model
-                elif event_type == "on_chat_model_stream":
-                    if node_name == "intent_classifier":
-                        continue
-                        
+                if event_type == "on_chat_model_stream" and node_name == "agent_node":
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
                         text = ""
@@ -244,13 +211,20 @@ class ChatService:
                     yield f"data: {json.dumps({'tool_call': {'name': tool_name, 'args': tool_args}})}\n\n"
                     tool_steps.append({"name": tool_name, "args": tool_args, "status": "running"})
 
+                    if tool_name == "load_skill":
+                        skill_name = (tool_args or {}).get("skill_name", "")
+                        if skill_name:
+                            skill_data = {'name': skill_name, 'content': ''}
+                            skills.append(skill_data)
+                            yield f"data: {json.dumps({'skill_used': skill_data})}\n\n"
+
                 elif event_type == "on_tool_end":
                     tool_name = event.get("name")
                     output    = event.get("data", {}).get("output", "")
                     yield f"data: {json.dumps({'tool_output': {'name': tool_name, 'result': str(output)}})}\n\n"
                     
                     # Intercept artifact creation
-                    if tool_name in ["write_to_file", "create_pdf", "create_docx", "create_pptx", "execute_code"]:
+                    if tool_name in ["write_to_file", "create_pdf", "create_docx", "create_pptx", "run_python"]:
                         matched_args = {}
                         for step in reversed(tool_steps):
                             if step["name"] == tool_name and step["status"] == "running":
@@ -259,15 +233,28 @@ class ChatService:
                                 matched_args = step.get("args", {})
                                 break
                         
-                        # For execute_code, parse file path from the output string
-                        if tool_name == "execute_code":
+                        # For run_python, parse file path from the output string
+                        if tool_name == "run_python":
                             out_str = str(output)
                             # Look for common file creation patterns in the output
                             import re
-                            file_match = re.search(r'(?:saved?|created?|written?|output).*?[:\s]+([\w./\\-]+\.(?:pdf|docx|pptx|xlsx|csv|txt|html|png|jpg))', out_str, re.IGNORECASE)
+                            file_match = re.search(r'(?:saved?|created?|written?|output).*?[:\s]+([\w./\\-]+\.(?:pdf|docx|pptx|xlsx|csv|txt|html|png|jpg|md|json))', out_str, re.IGNORECASE)
                             if file_match:
                                 file_path = file_match.group(1).strip()
-                                artifact_data = {'name': file_path, 'content': matched_args.get('code', ''), 'tool': tool_name}
+                                content = matched_args.get('code', '')
+                                
+                                # Try to read the actual file content if it's text-based
+                                if file_path.lower().endswith(('.md', '.txt', '.csv', '.json', '.html')):
+                                    try:
+                                        from utils.workspace import workspace_for
+                                        ws = workspace_for(user_id)
+                                        actual_file = ws / file_path
+                                        if actual_file.exists():
+                                            content = actual_file.read_text(encoding='utf-8')
+                                    except Exception:
+                                        pass
+
+                                artifact_data = {'name': file_path, 'content': content, 'tool': tool_name}
                                 artifacts.append(artifact_data)
                                 yield f"data: {json.dumps({'artifact_created': artifact_data})}\n\n"
                         else:
@@ -284,11 +271,24 @@ class ChatService:
                                 step["status"] = "completed"
                                 break
 
-                # Token tracking
-                elif event_type == "on_chat_model_end":
+                # Token tracking and final text fallback
+                elif event_type == "on_chat_model_end" and node_name == "agent_node":
                     output_msg = event.get("data", {}).get("output")
-                    if output_msg and hasattr(output_msg, "usage_metadata") and output_msg.usage_metadata:
-                        usage = output_msg.usage_metadata
+                    if output_msg:
+                        # Fallback: if no text was streamed, capture it here
+                        content = getattr(output_msg, "content", "")
+                        if content and isinstance(content, str) and content not in full_response:
+                            full_response += content
+                            yield f"data: {json.dumps({'chunk': content})}\n\n"
+                        elif isinstance(content, list):
+                            text_parts = [p["text"] if isinstance(p, dict) and "text" in p else str(p) for p in content if isinstance(p, dict) and "text" in p or isinstance(p, str)]
+                            text_str = "".join(text_parts)
+                            if text_str and text_str not in full_response:
+                                full_response += text_str
+                                yield f"data: {json.dumps({'chunk': text_str})}\n\n"
+
+                        if hasattr(output_msg, "usage_metadata") and output_msg.usage_metadata:
+                            usage = output_msg.usage_metadata
                         total_input_tokens  += usage.get("input_tokens", 0)
                         total_output_tokens += usage.get("output_tokens", 0)
                         logger.info(
@@ -303,27 +303,26 @@ class ChatService:
 
             # ── Step 7b: Detect files created during agent execution ──────────────────
             created_files = []
-            if routed_agent in ("document", "code", "data", "shell"):
-                try:
-                    import time as _time
-                    from utils.workspace import workspace_for as _ws_for
-                    user_ws = _ws_for(user_id)
-                    cutoff = _time.time() - 300  # files created in last 5 minutes
-                    CREATED_EXT = {".pdf", ".docx", ".pptx", ".xlsx", ".csv", ".txt", ".html", ".png", ".jpg", ".svg"}
+            try:
+                import time as _time
+                from utils.workspace import workspace_for as _ws_for
+                user_ws = _ws_for(user_id)
+                cutoff = _time.time() - 300  # files created in last 5 minutes
+                CREATED_EXT = {".pdf", ".docx", ".pptx", ".xlsx", ".csv", ".txt", ".html", ".png", ".jpg", ".svg", ".md", ".json"}
 
-                    if user_ws.exists():
-                        for f in sorted(user_ws.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-                            if f.is_file() and f.stat().st_mtime > cutoff and f.suffix.lower() in CREATED_EXT:
-                                created_files.append({
-                                    "name":         f.name,
-                                    "size_bytes":   f.stat().st_size,
-                                    "download_url": f"/api/outputs/my/{f.name}",
-                                    "ext":          f.suffix.lower().lstrip("."),
-                                })
-                    if created_files:
-                        yield f"data: {json.dumps({'files_created': created_files})}\n\n"
-                except Exception as _fe:
-                    logger.warning(f"File detection failed (non-fatal): {_fe}")
+                if user_ws.exists():
+                    for f in sorted(user_ws.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+                        if f.is_file() and f.stat().st_mtime > cutoff and f.suffix.lower() in CREATED_EXT:
+                            created_files.append({
+                                "name":         f.name,
+                                "size_bytes":   f.stat().st_size,
+                                "download_url": f"/api/outputs/my/{f.name}",
+                                "ext":          f.suffix.lower().lstrip("."),
+                            })
+                if created_files:
+                    yield f"data: {json.dumps({'files_created': created_files})}\n\n"
+            except Exception as _fe:
+                logger.warning(f"File detection failed (non-fatal): {_fe}")
 
             # ── Step 8: Save AI response ────────────────────────────────
             cost_usd = (
@@ -340,7 +339,6 @@ class ChatService:
                 "artifacts":       artifacts,
                 "files_created":   created_files,
                 "model":           model,
-                "routed_agent":    routed_agent,
                 "input_tokens":    total_input_tokens,
                 "output_tokens":   total_output_tokens,
                 "cost_usd":        round(cost_usd, 8),

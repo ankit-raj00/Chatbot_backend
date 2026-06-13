@@ -13,13 +13,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from core.middleware import get_current_user
 
-router = APIRouter(prefix="/api/outputs", tags=["Outputs"])
+router = APIRouter(prefix="/outputs", tags=["Outputs"])
 
 _DEFAULT_WS = str(Path.home() / "agentx_workspace")
 OUTPUTS_DIR = Path(os.getenv("WORKSPACE_ROOT", _DEFAULT_WS))
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
-ALLOWED_EXT = {".pdf", ".docx", ".pptx", ".xlsx", ".csv", ".txt", ".html", ".svg", ".png", ".jpg"}
+ALLOWED_EXT = {".pdf", ".docx", ".pptx", ".xlsx", ".csv", ".txt", ".html", ".svg", ".png", ".jpg", ".md", ".json"}
 
 def _user_dir(user_id: str) -> Path:
     p = OUTPUTS_DIR / user_id
@@ -88,7 +88,7 @@ async def download_my_output(
     return FileResponse(
         path=str(file_path),
         filename=filename,
-        media_type="application/octet-stream",
+        content_disposition_type="inline"
     )
 
 
@@ -117,7 +117,7 @@ async def download_output(
     return FileResponse(
         path=str(file_path),
         filename=filename,
-        media_type="application/octet-stream",
+        content_disposition_type="inline"
     )
 
 

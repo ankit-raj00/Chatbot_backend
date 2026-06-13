@@ -37,6 +37,7 @@ def get_llm(model_name: str) -> ChatGoogleGenerativeAI:
             temperature=0.7,
             max_tokens=None,
             max_retries=2,
+            streaming=True,
             google_api_key=os.getenv("GOOGLE_API_KEY"),
         )
     return _registry[model_name]
