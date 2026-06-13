@@ -1,85 +1,74 @@
 """
-Graph Builder: Assembles the Chat Graph
+Graph Builder v3 — single ReAct agent.
+Replaces graph/supervisor.py and graph/builder.py (v2 flat-chat version).
 """
-from typing import Literal
-from langchain_core.runnables import RunnableConfig
+import os
+import structlog
 from langgraph.graph import StateGraph, START, END
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from graph.nodes.common import ChatState
-from graph.nodes.setup_node import setup_node
-from graph.nodes.native_tool_node import native_tool_node
-from graph.nodes.mcp_tool_node import mcp_tool_node
-from graph.router import route_tools
-from tools import AVAILABLE_TOOLS
-from utils.mcp_connection_manager import mcp_manager
+from graph.nodes.agent_node import agent_node
+from graph.nodes.agent_tool_node import agent_tool_node
 
-async def chat_model_node(state: ChatState, config: RunnableConfig):
-    """
-    Core LLM Node.
-    Binds tools dynamically based on configuration.
-    """
-    # 1. Get Configuration
-    configuration = config.get("configurable", {})
-    enabled_tool_names = configuration.get("enabled_tools", [])
-    model_name = configuration.get("model", "gemini-2.0-flash-exp")
-    
-    # 2. Collect Tools
-    tools_to_bind = []
-    
-    # Native Tools
-    for name in enabled_tool_names:
-        if name in AVAILABLE_TOOLS:
-            # Import on demand to avoid circular deps if any
-            from tools import get_tool
-            # Because we wrapped them with @tool, get_tool returns the structured tool
-            t = get_tool(name)
-            if t:
-                tools_to_bind.append(t)
-                
-    # MCP Tools (always bind all available from active connections)
-    # Note: efficient because get_all_active_mcp_tools uses cached sessions
-    mcp_tools = await mcp_manager.get_all_langchain_tools()
-    tools_to_bind.extend(mcp_tools)
-    
-    # 3. Get cached LLM instance (created once, reused per model name)
-    from graph.llm_registry import get_llm
-    llm = get_llm(model_name)
-    
-    if tools_to_bind:
-        llm = llm.bind_tools(tools_to_bind)
-        
-    # 4. Invoke
-    response = await llm.ainvoke(state["messages"])
-    return {"messages": [response]}
+logger = structlog.get_logger(__name__)
+
+REDIS_URL = os.getenv("REDIS_URL", "")
 
 
-def build_graph():
-    """Constructs the executable LangGraph"""
+def _route_after_agent(state: ChatState) -> str:
+    last = state["messages"][-1]
+    if getattr(last, "tool_calls", None):
+        return "agent_tool_node"
+    return END
+
+
+def _build_graph():
     builder = StateGraph(ChatState)
-    
-    # Add Nodes
-    builder.add_node("setup_node", setup_node)
-    builder.add_node("chat_model", chat_model_node)
-    builder.add_node("native_tool_node", native_tool_node)
-    builder.add_node("mcp_tool_node", mcp_tool_node)
-    
-    # Add Edges
-    builder.add_edge(START, "setup_node")
-    builder.add_edge("setup_node", "chat_model")
-    
-    # Conditional Edge (Router)
-    builder.add_conditional_edges(
-        "chat_model",
-        route_tools,
-        ["native_tool_node", "mcp_tool_node", END]
-    )
-    
-    # Return from tools back to model
-    builder.add_edge("native_tool_node", "chat_model")
-    builder.add_edge("mcp_tool_node", "chat_model")
-    
-    return builder.compile()
+    builder.add_node("agent_node", agent_node)
+    builder.add_node("agent_tool_node", agent_tool_node)
 
-# Singleton for easy import
-chat_graph = build_graph()
+    builder.add_edge(START, "agent_node")
+    builder.add_conditional_edges("agent_node", _route_after_agent, ["agent_tool_node", END])
+    builder.add_edge("agent_tool_node", "agent_node")
+
+    return builder
+
+
+async def _init_checkpointer():
+    """Same Redis-or-MemorySaver pattern as old supervisor._init_checkpointer."""
+    if REDIS_URL:
+        try:
+            from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+            cm = AsyncRedisSaver.from_conn_string(REDIS_URL)
+            checkpointer = await cm.__aenter__()
+            logger.info("agent_graph.checkpointer=redis")
+            return checkpointer, cm
+        except Exception as e:
+            logger.warning(f"Redis checkpointer failed ({e}) — using MemorySaver")
+    from langgraph.checkpoint.memory import MemorySaver
+    logger.info("agent_graph.checkpointer=memory")
+    return MemorySaver(), None
+
+
+_graph_instance = None
+_checkpointer = None
+_checkpointer_cm = None
+
+
+async def get_agent_graph():
+    global _graph_instance, _checkpointer, _checkpointer_cm
+    if _graph_instance is None:
+        _checkpointer, _checkpointer_cm = await _init_checkpointer()
+        _graph_instance = _build_graph().compile(checkpointer=_checkpointer)
+        logger.info("agent_graph.compiled")
+    return _graph_instance
+
+
+async def close_agent_graph():
+    global _checkpointer_cm
+    if _checkpointer_cm is not None:
+        try:
+            await _checkpointer_cm.__aexit__(None, None, None)
+        except Exception as e:
+            logger.warning(f"agent_graph checkpointer close error: {e}")
+        _checkpointer_cm = None
