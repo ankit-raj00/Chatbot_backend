@@ -33,15 +33,63 @@ async def list_outputs(current_user: dict = Depends(get_current_user)):
     user_id  = str(current_user["_id"])
     user_dir = _user_dir(user_id)
     files = []
-    for f in sorted(user_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-        if f.is_file() and f.suffix.lower() in ALLOWED_EXT:
-            files.append({
-                "filename":   f.name,
-                "size_bytes": f.stat().st_size,
-                "created_at": f.stat().st_mtime,
-                "download_url": f"/api/outputs/download/{user_id}/{f.name}",
-            })
+    if user_dir.exists():
+        for f in sorted(user_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+            if f.is_file() and f.suffix.lower() in ALLOWED_EXT:
+                files.append({
+                    "filename":   f.name,
+                    "size_bytes": f.stat().st_size,
+                    "created_at": f.stat().st_mtime,
+                    "download_url": f"/api/outputs/download/{user_id}/{f.name}",
+                })
     return {"files": files}
+
+@router.get("/my")
+async def list_my_outputs(current_user: dict = Depends(get_current_user)):
+    """List all generated files for the current user (JWT auth only, no user_id in URL)."""
+    user_id  = str(current_user["_id"])
+    user_dir = _user_dir(user_id)
+    files = []
+    if user_dir.exists():
+        for f in sorted(user_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+            if f.is_file() and f.suffix.lower() in ALLOWED_EXT:
+                files.append({
+                    "filename":     f.name,
+                    "size_bytes":   f.stat().st_size,
+                    "download_url": f"/api/outputs/my/{f.name}",
+                    "created_at":   f.stat().st_mtime,
+                })
+    return {"files": files}
+
+
+@router.get("/my/{filename}")
+async def download_my_output(
+    filename: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Download a file from the current user's workspace.
+    User identity comes from JWT — no user_id needed in URL.
+    This is the URL that LLM-generated download links should use.
+    Example: /api/outputs/my/Dogs_Report.pdf
+    """
+    user_id   = str(current_user["_id"])
+    file_path = _user_dir(user_id) / filename
+    
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"File '{filename}' not found.")
+    if file_path.suffix.lower() not in ALLOWED_EXT:
+        raise HTTPException(status_code=400, detail="File type not permitted")
+    try:
+        file_path.resolve().relative_to(OUTPUTS_DIR.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Invalid path")
+    
+    return FileResponse(
+        path=str(file_path),
+        filename=filename,
+        media_type="application/octet-stream",
+    )
 
 
 @router.get("/download/{user_id}/{filename}")

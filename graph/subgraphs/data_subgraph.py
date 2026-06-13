@@ -20,45 +20,8 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 MAX_ITER = 6
-_DEFAULT_WS = str(Path.home() / "agentx_workspace")
-
-
-def _workspace_for(user_id: str = "anonymous") -> Path:
-    ws = Path(os.getenv("WORKSPACE_ROOT", _DEFAULT_WS)) / user_id
-    ws.mkdir(parents=True, exist_ok=True)
-    return ws
-
-
-async def _run_python(code: str, cwd: str, timeout: int = 300) -> str:
-    Path(cwd).mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", dir=cwd, delete=False, encoding="utf-8"
-    ) as f:
-        f.write(code)
-        tmp = f.name
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, tmp,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-        )
-        try:
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            return f"TIMEOUT: exceeded {timeout}s."
-        return ((out.decode("utf-8", "replace") + err.decode("utf-8", "replace")).strip() or "(no output)")[:8000]
-    finally:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-
-
-def _extract_python_blocks(text: str) -> list[str]:
-    return re.findall(r"```python\s*\n(.*?)```", text, re.DOTALL)
-
+from utils.workspace import workspace_for as _workspace_for
+from utils.code_executor import run_python as _run_python, extract_python_blocks as _extract_python_blocks
 
 async def _load_file_context(file_path: str) -> str:
     """Load a data file and return its content as a string for LLM context."""

@@ -50,7 +50,8 @@ python-docx
 python-pptx
 openpyxl
 weasyprint
-reportlab
+reportlab>=4.0.0
+fpdf2>=2.7.0
 
 # ─── Phase 5: RAG improvements ───────────────────────────────
 # (uses langchain-google-genai embeddings already listed)

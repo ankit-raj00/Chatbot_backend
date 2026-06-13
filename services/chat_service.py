@@ -169,6 +169,8 @@ class ChatService:
             # ── Step 7: Stream supervisor events ────────────────────────
             full_response       = ""
             tool_steps          = []
+            skills              = []
+            artifacts           = []
             total_input_tokens  = 0
             total_output_tokens = 0
             routed_agent        = ""
@@ -199,7 +201,9 @@ class ChatService:
                     skill_name = output.get("skill_name")
                     skill_body = output.get("skill_body")
                     if skill_name and skill_body:
-                        yield f"data: {json.dumps({'skill_used': {'name': skill_name, 'content': skill_body}})}\n\n"
+                        skill_data = {'name': skill_name, 'content': skill_body}
+                        skills.append(skill_data)
+                        yield f"data: {json.dumps({'skill_used': skill_data})}\n\n"
 
                 # Capture final text from agent nodes when no chunks were streamed
                 # (e.g. document agent uses execute_code → the final summary text comes from on_chain_end)
@@ -263,12 +267,16 @@ class ChatService:
                             file_match = re.search(r'(?:saved?|created?|written?|output).*?[:\s]+([\w./\\-]+\.(?:pdf|docx|pptx|xlsx|csv|txt|html|png|jpg))', out_str, re.IGNORECASE)
                             if file_match:
                                 file_path = file_match.group(1).strip()
-                                yield f"data: {json.dumps({'artifact_created': {'name': file_path, 'content': matched_args.get('code', ''), 'tool': tool_name}})}\n\n"
+                                artifact_data = {'name': file_path, 'content': matched_args.get('code', ''), 'tool': tool_name}
+                                artifacts.append(artifact_data)
+                                yield f"data: {json.dumps({'artifact_created': artifact_data})}\n\n"
                         else:
                             file_path = matched_args.get("file_path", "") or matched_args.get("target_file", "") or matched_args.get("output_path", "")
                             file_content = matched_args.get("content", "") or matched_args.get("code", "")
                             if "error" not in str(output).lower() and file_path:
-                                yield f"data: {json.dumps({'artifact_created': {'name': file_path, 'content': file_content, 'tool': tool_name}})}\n\n"
+                                artifact_data = {'name': file_path, 'content': file_content, 'tool': tool_name}
+                                artifacts.append(artifact_data)
+                                yield f"data: {json.dumps({'artifact_created': artifact_data})}\n\n"
                     else:
                         for step in reversed(tool_steps):
                             if step["name"] == tool_name and step["status"] == "running":
@@ -293,6 +301,30 @@ class ChatService:
                             output_tokens=usage.get("output_tokens", 0),
                         )
 
+            # ── Step 7b: Detect files created during agent execution ──────────────────
+            created_files = []
+            if routed_agent in ("document", "code", "data", "shell"):
+                try:
+                    import time as _time
+                    from utils.workspace import workspace_for as _ws_for
+                    user_ws = _ws_for(user_id)
+                    cutoff = _time.time() - 300  # files created in last 5 minutes
+                    CREATED_EXT = {".pdf", ".docx", ".pptx", ".xlsx", ".csv", ".txt", ".html", ".png", ".jpg", ".svg"}
+
+                    if user_ws.exists():
+                        for f in sorted(user_ws.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+                            if f.is_file() and f.stat().st_mtime > cutoff and f.suffix.lower() in CREATED_EXT:
+                                created_files.append({
+                                    "name":         f.name,
+                                    "size_bytes":   f.stat().st_size,
+                                    "download_url": f"/api/outputs/my/{f.name}",
+                                    "ext":          f.suffix.lower().lstrip("."),
+                                })
+                    if created_files:
+                        yield f"data: {json.dumps({'files_created': created_files})}\n\n"
+                except Exception as _fe:
+                    logger.warning(f"File detection failed (non-fatal): {_fe}")
+
             # ── Step 8: Save AI response ────────────────────────────────
             cost_usd = (
                 total_input_tokens  * INPUT_PRICE_PER_TOKEN +
@@ -304,6 +336,9 @@ class ChatService:
                 "role":            "model",
                 "content":         full_response,
                 "tool_steps":      tool_steps,
+                "skills":          skills,
+                "artifacts":       artifacts,
+                "files_created":   created_files,
                 "model":           model,
                 "routed_agent":    routed_agent,
                 "input_tokens":    total_input_tokens,

@@ -15,17 +15,9 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
-# Cross-platform workspace: env var > home dir fallback (no /tmp on Windows)
-_DEFAULT_WORKSPACE = str(Path.home() / "agentx_workspace")
-WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", _DEFAULT_WORKSPACE))
+from utils.workspace import workspace_for as _workspace_for_util
+
 _TIMEOUT = 60  # seconds
-
-
-def _workspace_for(user_id: str = "anonymous") -> Path:
-    """Return (and create) the per-user workspace directory."""
-    ws = WORKSPACE_ROOT / user_id
-    ws.mkdir(parents=True, exist_ok=True)
-    return ws
 
 
 async def _exec_code(code: str, cwd: str, timeout: int = _TIMEOUT) -> str:
@@ -138,7 +130,7 @@ async def execute_code(code: str) -> str:
     Args:
         code: A complete, runnable Python script
     """
-    cwd = str(_workspace_for("anonymous"))
+    cwd = str(_workspace_for_util("anonymous"))
     result = await _exec_code(code, cwd)
     if "ModuleNotFoundError" in result or "No module named" in result:
         retry = await _auto_install_and_retry(code, result, cwd)
