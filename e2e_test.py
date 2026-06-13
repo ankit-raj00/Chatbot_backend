@@ -17,7 +17,9 @@ import os
 # ──────────────────────────────────────────────
 #  CONFIG
 # ──────────────────────────────────────────────
-BASE_URL      = "https://chatbot-backend-jsfm.onrender.com"
+from dotenv import load_dotenv
+load_dotenv()
+BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 import os as _os
 PDF_PATH = _os.getenv("E2E_PDF_PATH", "./tests/fixtures/sample.pdf")
 TEST_EMAIL    = f"e2etest_{int(time.time())}@test.com"

@@ -35,6 +35,10 @@ from routes.user_routes import router as user_router
 from routes.upload_routes import router as upload_router
 from routes.rag_routes import router as rag_router
 from routes.admin_routes import router as admin_router
+# ── Phase 2b / Phase 8 new routes ────────────────────────────
+from routes.skill_vault_routes import router as skill_vault_router
+from routes.agent_routes import router as agent_router
+from routes.output_routes import router as output_router
 
 from contextlib import asynccontextmanager
 
@@ -138,13 +142,38 @@ async def lifespan(app: FastAPI):
     else:
         print("ℹ️  LangSmith tracing disabled (set LANGCHAIN_TRACING_V2=true to enable)")
 
-    yield # App is running
+    # ── Supervisor graph init ──────────────────────────────────
+    try:
+        from graph.supervisor import get_supervisor
+        await get_supervisor()   # warm up — creates Redis checkpointer connection
+        print("✅ Supervisor graph initialized")
+    except Exception as e:
+        print(f"⚠️  Supervisor init warning: {e}")
+
+    # ── Workspace cleanup background task ─────────────────────
+    import asyncio
+    try:
+        from utils.workspace_cleanup import run_cleanup_loop
+        asyncio.create_task(run_cleanup_loop())
+        print("✅ Workspace cleanup task started")
+    except Exception as e:
+        print(f"⚠️  Cleanup task warning: {e}")
+
+    yield  # App is running
 
     # Shutdown: Cleanup MCP connections
     print("🧹 Shutting down: Cleaning up MCP connections")
     from utils.mcp_connection_manager import mcp_manager
     await mcp_manager.disconnect_all()
-    
+
+    # Shutdown: close supervisor checkpointer
+    try:
+        from graph.supervisor import close_supervisor
+        await close_supervisor()
+        print("✅ Supervisor checkpointer closed")
+    except Exception:
+        pass
+
     # Phase 2: Close Redis
     await close_redis()
 
@@ -263,6 +292,10 @@ app.include_router(user_router)
 app.include_router(upload_router)
 app.include_router(rag_router)
 app.include_router(admin_router)
+# ── Phase 2b / Phase 8 new routers ──────────────────────────
+app.include_router(skill_vault_router)
+app.include_router(agent_router)
+app.include_router(output_router)
 
 # Attach middlewares
 app.add_middleware(CorrelationIdMiddleware)

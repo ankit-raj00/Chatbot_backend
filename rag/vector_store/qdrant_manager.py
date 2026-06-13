@@ -124,13 +124,13 @@ class QdrantManager:
                         field_name=field,
                         field_schema=models.PayloadSchemaType.KEYWORD,
                     )
-                    logger.info(f"🔑 Payload index '{field}' ensured.")
+                    logger.info(f"Payload index '{field}' ensured.")
                 except Exception as idx_err:
                     err_msg = str(idx_err).lower()
                     if "already exists" in err_msg or "index already" in err_msg:
-                        logger.info(f"🔑 Payload index '{field}' already exists.")
+                        logger.info(f"Payload index '{field}' already exists.")
                     else:
-                        logger.warning(f"⚠️  Could not create payload index '{field}': {idx_err}")
+                        logger.warning(f"Could not create payload index '{field}': {idx_err}")
 
 
         except Exception as e:

@@ -80,6 +80,30 @@ class PromptBuilder:
             section += f"- {mem.get('topic', '')}: {mem.get('content', '')}\n"
         return section + "\n"
 
+    @staticmethod
+    def build_skills_section(active_skill_body: str = "") -> str:
+        """
+        Inject a skill's full body when triggered, OR list available skills.
+        - If active_skill_body is provided: inject the full skill instructions
+        - Otherwise: inject a short listing of available skills so the LLM knows capabilities
+        """
+        if active_skill_body:
+            return f"\n### ACTIVE SKILL INSTRUCTIONS\n{active_skill_body}\n\n"
+
+        try:
+            from skills.skill_loader import list_builtin_skills
+            skills = list_builtin_skills()
+            if not skills:
+                return ""
+            lines = [f"- **{s['name']}**: {s['description'][:120]}" for s in skills[:10]]
+            return (
+                "\n### AVAILABLE SKILLS\n"
+                "These skill packages provide detailed instructions for specialist tasks:\n" +
+                "\n".join(lines) + "\n\n"
+            )
+        except Exception:
+            return ""
+
     @classmethod
     def assemble(
         cls,
@@ -87,12 +111,12 @@ class PromptBuilder:
         mcp_resources: list[dict] = None,
         mcp_prompts: list[dict] = None,
         user_memories: list[dict] = None,
+        active_skill_body: str = "",
     ) -> str:
         """Assemble the complete system prompt from all sections."""
-        core = cls.build_core_system_prompt(enabled_tools)
-        mcp = cls.build_mcp_context_section(
-            mcp_resources or [],
-            mcp_prompts or []
-        )
+        core   = cls.build_core_system_prompt(enabled_tools)
+        mcp    = cls.build_mcp_context_section(mcp_resources or [], mcp_prompts or [])
         memory = cls.build_memory_section(user_memories or [])
-        return f"{core}\n{memory}{mcp}".strip()
+        skills = cls.build_skills_section(active_skill_body)
+        return f"{core}\n{memory}{skills}{mcp}".strip()
+
