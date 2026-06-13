@@ -1,13 +1,12 @@
 """
-LLM Registry — singleton LLM instances per model name.
+LLM Registry — singleton LLM instances per model name, wrapped with circuit breaker.
 
 WHY: ChatGoogleGenerativeAI() instantiates an HTTP client on creation.
      Creating it fresh on every LangGraph node execution wastes time and
      resources. This registry creates each model once and reuses it.
 
-WHY NOT a module-level global: Module-level globals are created at import time
-     before the API key is loaded from .env. The lazy-init dict pattern below
-     creates the instance on first use, by which time the env var is loaded.
+WHY circuit breaker: If Gemini API is down, we fail fast instead of
+     letting 100 concurrent requests each wait through 30s backoff = system hangs.
 
 Usage:
     from graph.llm_registry import get_llm
@@ -15,8 +14,10 @@ Usage:
     llm_with_tools = llm.bind_tools(tools)  # bind_tools does NOT mutate the original
 """
 
+import os
 import logging
 from langchain_google_genai import ChatGoogleGenerativeAI
+from utils.circuit_breaker import gemini_breaker
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +37,19 @@ def get_llm(model_name: str) -> ChatGoogleGenerativeAI:
             temperature=0.7,
             max_tokens=None,
             max_retries=2,
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
         )
     return _registry[model_name]
+
+
+async def invoke_with_breaker(model_name: str, messages: list) -> object:
+    """
+    Invoke an LLM call wrapped in the gemini circuit breaker.
+    Use this for critical paths where cascading failures must be prevented.
+    Falls back gracefully when the breaker is OPEN.
+    """
+    llm = get_llm(model_name)
+    return await gemini_breaker.call(llm.ainvoke, messages)
 
 
 def clear_registry() -> None:
