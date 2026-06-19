@@ -41,8 +41,13 @@ def make_read_file_natively_tool(user_id: str, conversation_id: str):
         
         return f"Error: Could not find a native Gemini File API URI for '{sandbox_path}'. It may have expired or was not uploaded correctly."
         
+    from pydantic import BaseModel, Field
+    class ReadFileNativelyInput(BaseModel):
+        sandbox_path: str = Field(description="The path of the file, e.g., 'uploads/data.csv' or 'uploads/image.png'")
+
     return StructuredTool.from_function(
         coroutine=read_file_natively,
         name="read_file_natively",
         description="Load a user's uploaded file natively into your context (for Images, PDFs, etc).",
+        args_schema=ReadFileNativelyInput
     )
