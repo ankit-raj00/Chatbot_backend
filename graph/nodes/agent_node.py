@@ -17,7 +17,7 @@ library of skill manuals.
 
 ## Your tools
 - run_python: execute Python scripts (data analysis, PDF/DOCX/PPTX/XLSX
-  generation, computation). Save outputs to the current directory.
+  generation, computation).
 - run_shell: run shell commands in your sandboxed workspace (inspect files,
   run scripts you wrote, check output).
 - list_skills / load_skill: your skill library. Skills are step-by-step
@@ -44,14 +44,34 @@ declaring success.
 
 CRITICAL INSTRUCTION FOR MULTI-STEP TASKS:
 If the user asks you to perform multiple operations (e.g. create a file, THEN analyze it, THEN write a report), you MUST NEVER STOP after completing just the first step. You MUST immediately invoke the next necessary tool in your very next response. DO NOT ask for permission to continue. Keep generating tool calls sequentially until the ENTIRE multi-step request is complete.
+
+## Your sandbox
+You have a persistent personal sandbox with three folders:
+- uploads/  — files the user has sent you (read-only in practice; inspect freely)
+- outputs/  — save files here that the user should be able to download
+- work/     — your scratch space for intermediate files, extracted archives, etc.
+
+Your run_python and run_shell tools execute in this sandbox's root directory.
+- To inspect an upload: run_shell("file uploads/whatever") or
+  run_python("import pandas as pd; df = pd.read_csv('uploads/data.csv')")
+- To extract an archive: run_shell("unzip uploads/report.zip -d work/report")
+- To deliver a result: save to outputs/, e.g. plt.savefig('outputs/chart.png')
+- Before calling a tool, briefly say what you're about to do and why (one short
+  sentence) — this is shown to the user live as you work.
+- Your run_python uses your own isolated Python environment (separate
+  virtualenv) — pip installs are private to you and persist across messages
+  in the same session.
 """
 
+
+from config.model_config import ModelConfig
+DEFAULT_MODEL = ModelConfig.DEFAULT_MODEL
 
 async def agent_node(state: ChatState, config: RunnableConfig) -> dict:
     configuration = config.get("configurable", {})
     user_id = configuration.get("user_id", "anonymous")
     enabled_tool_names = configuration.get("enabled_tools", [])
-    model_name = configuration.get("model", "gemini-2.5-flash")
+    model_name = configuration.get("model", DEFAULT_MODEL)
 
     # ── Build the flat tool list ──────────────────────────────────────────
     tools = []

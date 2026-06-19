@@ -1,3 +1,0 @@
-Requirement already satisfied: reportlab in d:\gemini playgroun\vscodeground\chatbot\backend\venv\lib\site-packages (4.5.1)
-Requirement already satisfied: pillow>=9.0.0 in d:\gemini playgroun\vscodeground\chatbot\backend\venv\lib\site-packages (from reportlab) (12.2.0)
-Requirement already satisfied: charset-normalizer in d:\gemini playgroun\vscodeground\chatbot\backend\venv\lib\site-packages (from reportlab) (3.4.7)

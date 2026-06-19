@@ -10,7 +10,8 @@ WHY circuit breaker: If Gemini API is down, we fail fast instead of
 
 Usage:
     from graph.llm_registry import get_llm
-    llm = get_llm("gemini-2.5-flash")
+    from config.model_config import ModelConfig
+    llm = get_llm(ModelConfig.DEFAULT_MODEL)
     llm_with_tools = llm.bind_tools(tools)  # bind_tools does NOT mutate the original
 """
 
