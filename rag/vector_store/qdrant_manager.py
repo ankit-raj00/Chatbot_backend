@@ -46,7 +46,7 @@ class QdrantManager:
         # --- Connection Strategy ---
         if self.api_key:
             # CLOUD MODE: API key provided — must be Qdrant Cloud
-            logger.info(f"☁️  Connecting to Qdrant Cloud: {self.url}")
+            logger.info(f"Connecting to Qdrant Cloud: {self.url}")
             self.client = QdrantClient(
                 url=self.url,
                 api_key=self.api_key,
@@ -55,9 +55,9 @@ class QdrantManager:
             # Verify cloud connection immediately on startup
             try:
                 self.client.get_collections()
-                logger.info("✅ Qdrant Cloud connected successfully.")
+                logger.info("Qdrant Cloud connected successfully.")
             except Exception as e:
-                logger.error(f"❌ Failed to connect to Qdrant Cloud: {e}")
+                logger.error(f"Failed to connect to Qdrant Cloud: {e}")
                 raise RuntimeError(
                     f"Could not reach Qdrant Cloud at {self.url}. "
                     "Check QDRANT_URL and QDRANT_API_KEY."
@@ -65,16 +65,16 @@ class QdrantManager:
         else:
             # LOCAL MODE: Try local server first, then embedded fallback
             try:
-                logger.info(f"🔌 Connecting to local Qdrant server: {self.url}")
+                logger.info(f"Connecting to local Qdrant server: {self.url}")
                 self.client = QdrantClient(url=self.url, timeout=5)
                 self.client.get_collections()
-                logger.info("✅ Local Qdrant server connected.")
+                logger.info("Local Qdrant server connected.")
             except Exception:
                 backend_root = pathlib.Path(__file__).parent.parent.parent
                 qdrant_path = backend_root / "qdrant_data"
                 self._remove_stale_lock(qdrant_path)
                 logger.warning(
-                    f"⚠️  Local server unreachable. Using EMBEDDED mode at {qdrant_path}"
+                    f"Local server unreachable. Using EMBEDDED mode at {qdrant_path}"
                 )
                 self.client = QdrantClient(path=str(qdrant_path))
 
@@ -85,7 +85,7 @@ class QdrantManager:
         if lock_file.exists():
             try:
                 os.remove(lock_file)
-                logger.warning(f"🔓 Removed stale lock: {lock_file}")
+                logger.warning(f"Removed stale lock: {lock_file}")
             except Exception as e:
                 logger.error(f"Failed to remove lock: {e}")
 
@@ -103,7 +103,7 @@ class QdrantManager:
             exists = any(c.name == self.collection_name for c in collections.collections)
 
             if not exists:
-                logger.info(f"📦 Creating collection '{self.collection_name}' (dim=768, cosine)")
+                logger.info(f"Creating collection '{self.collection_name}' (dim=768, cosine)")
                 self.client.create_collection(
                     collection_name=self.collection_name,
                     vectors_config=models.VectorParams(
@@ -111,9 +111,9 @@ class QdrantManager:
                         distance=models.Distance.COSINE
                     )
                 )
-                logger.info(f"✅ Collection '{self.collection_name}' created.")
+                logger.info(f"Collection '{self.collection_name}' created.")
             else:
-                logger.info(f"✅ Collection '{self.collection_name}' already exists.")
+                logger.info(f"Collection '{self.collection_name}' already exists.")
 
             # ── Payload indexes (required for Qdrant Cloud filtered search) ────────
             # create_payload_index is idempotent — safe to call on every startup.
@@ -134,7 +134,7 @@ class QdrantManager:
 
 
         except Exception as e:
-            logger.error(f"❌ ensure_collection failed: {e}")
+            logger.error(f"ensure_collection failed: {e}")
             raise
 
     def list_unique_sources(self, user_id: str = None) -> list:
@@ -185,7 +185,7 @@ class QdrantManager:
                 {"file_id": fid, "filename": fname}
                 for fid, fname in seen.items()
             ]
-            logger.info(f"📂 Found {len(files)} unique files in Qdrant.")
+            logger.info(f"Found {len(files)} unique files in Qdrant.")
             return files
 
         except Exception as e:
@@ -221,7 +221,7 @@ class QdrantManager:
                     filter=models.Filter(must=must_conditions)
                 )
             )
-            logger.info(f"🗑️ Deleted all points for file_id: {file_id}")
+            logger.info(f"Deleted all points for file_id: {file_id}")
             return True
         except Exception as e:
             logger.error(f"Failed to delete file {file_id}: {e}")
