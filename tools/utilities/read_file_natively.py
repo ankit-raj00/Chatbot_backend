@@ -25,7 +25,11 @@ def make_read_file_natively_tool(user_id: str, conversation_id: str):
         async for msg in cursor:
             attachments = msg.get("attachments", [])
             for att in attachments:
-                if att.get("sandbox_path") == sandbox_path:
+                att_path = att.get("sandbox_path", "")
+                att_name = att.get("original_name", "")
+                
+                # Fuzzy match: handle exact path, original name, or just the filename part
+                if att_path == sandbox_path or att_name == sandbox_path or att_path.endswith(f"/{sandbox_path}") or sandbox_path.endswith(f"/{att_name}"):
                     gemini_uri = att.get("gemini_uri")
                     mime_type = att.get("mime_type", "")
                     if gemini_uri:
