@@ -13,6 +13,7 @@ from graph.nodes.common import ChatState
 from tools.utilities.run_python import make_run_python_tool
 from tools.utilities.run_shell import make_run_shell_tool
 from tools.utilities.skill_tools import list_skills, make_load_skill_tool
+from tools.utilities.read_file_natively import make_read_file_natively_tool
 from tools import AVAILABLE_TOOLS, get_tool
 from utils.mcp_connection_manager import mcp_manager
 from utils.hooks import run_pre_tool_hooks, run_post_tool_hooks, ToolTimer
@@ -32,14 +33,20 @@ async def _build_tool_map(state: ChatState, config: RunnableConfig) -> dict:
     """Rebuild the same tool list agent_node bound, keyed by tool.name."""
     configuration = config.get("configurable", {})
     user_id = configuration.get("user_id", "anonymous")
+    conversation_id = configuration.get("thread_id", "")
     enabled_tool_names = configuration.get("enabled_tools", [])
     selected_files = state.get("selected_files")
 
     tool_map = {}
 
+    # Always-on sandbox tools — must exactly mirror agent_node.py's tool list
     for t in (make_run_python_tool(user_id), make_run_shell_tool(user_id),
               list_skills, make_load_skill_tool(user_id)):
         tool_map[t.name] = (t, {"user_id": user_id, "selected_files": selected_files})
+
+    # read_file_natively needs conversation_id to look up the Gemini URI
+    rfn_tool = make_read_file_natively_tool(user_id, conversation_id)
+    tool_map[rfn_tool.name] = (rfn_tool, {})
 
     for name in enabled_tool_names:
         if name in AVAILABLE_TOOLS:
