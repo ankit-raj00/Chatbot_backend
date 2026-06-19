@@ -20,7 +20,7 @@ def make_read_file_natively_tool(user_id: str, conversation_id: str):
         # Find the most recent message in this conversation that has attachments
         cursor = messages_collection.find(
             {"conversation_id": conversation_id, "user_id": user_id, "attachments": {"$exists": True, "$ne": None}}
-        ).sort("timestamp", -1).limit(10)
+        ).sort("timestamp", -1).limit(50)
         
         async for msg in cursor:
             attachments = msg.get("attachments", [])
