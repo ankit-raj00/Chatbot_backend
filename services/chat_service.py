@@ -76,6 +76,26 @@ class ChatService:
             logger.warning(f"Failed to fetch MCP context: {e}")
             return [], []
 
+    @staticmethod
+    async def _bg_upload_to_cloudinary(file_path_str: str, filename: str, user_id: str):
+        try:
+            from utils.cloudinary_handler import CloudinaryHandler
+            from core.database import user_outputs_collection
+            from datetime import datetime
+            handler = CloudinaryHandler()
+            url, public_id = await handler.upload_file(file_path_str, folder=f"chatbot/outputs/{user_id}")
+            await user_outputs_collection.update_one(
+                {"user_id": user_id, "filename": filename},
+                {"$set": {
+                    "cloudinary_url": url,
+                    "public_id": public_id,
+                    "updated_at": datetime.utcnow()
+                }},
+                upsert=True
+            )
+        except Exception as e:
+            logger.error(f"Cloudinary upload failed: {e}")
+
     @classmethod
     async def stream(
         cls,
@@ -348,9 +368,12 @@ class ChatService:
                             created_files.append({
                                 "name":         f.name,
                                 "size_bytes":   f.stat().st_size,
-                                "download_url": f"/api/outputs/my/{f.name}",
+                                "download_url": f"/outputs/my/{f.name}",
                                 "ext":          f.suffix.lower().lstrip("."),
                             })
+                            # Launch background upload to Cloudinary for persistence
+                            import asyncio
+                            asyncio.create_task(cls._bg_upload_to_cloudinary(str(f), f.name, user_id))
                 if created_files:
                     yield f"data: {json.dumps({'files_created': created_files})}\n\n"
             except Exception as _fe:
