@@ -8,6 +8,7 @@ from graph.nodes.common import ChatState  # reuse existing TypedDict, see 2.6
 from tools.utilities.run_python import make_run_python_tool
 from tools.utilities.run_shell import make_run_shell_tool
 from tools.utilities.skill_tools import list_skills, make_load_skill_tool
+from tools.utilities.read_file_natively import make_read_file_natively_tool
 from tools import AVAILABLE_TOOLS, get_tool
 from utils.mcp_connection_manager import mcp_manager
 
@@ -20,6 +21,7 @@ library of skill manuals.
   generation, computation).
 - run_shell: run shell commands in your sandboxed workspace (inspect files,
   run scripts you wrote, check output).
+- read_file_natively: pass a file's sandbox path (like 'uploads/data.csv' or 'uploads/image.png') to load the file natively into your massive context window. Use this when you need to read a massive file without running code, or when you need to look at an image.
 - list_skills / load_skill: your skill library. Skills are step-by-step
   manuals for specific tasks (creating PDFs, analyzing data, reviewing code,
   generating diagrams, etc).
@@ -69,6 +71,7 @@ DEFAULT_MODEL = ModelConfig.DEFAULT_MODEL
 async def agent_node(state: ChatState, config: RunnableConfig) -> dict:
     configuration = config.get("configurable", {})
     user_id = configuration.get("user_id", "anonymous")
+    conversation_id = configuration.get("thread_id", "")
     enabled_tool_names = configuration.get("enabled_tools", [])
     model_name = configuration.get("model", DEFAULT_MODEL)
 
@@ -78,6 +81,7 @@ async def agent_node(state: ChatState, config: RunnableConfig) -> dict:
     # 1. Always-on sandbox tools (the core of "free will")
     tools.append(make_run_python_tool(user_id))
     tools.append(make_run_shell_tool(user_id))
+    tools.append(make_read_file_natively_tool(user_id, conversation_id))
 
     # 2. Skill tools (always on — cheap, and the agent needs to discover them)
     tools.append(list_skills)

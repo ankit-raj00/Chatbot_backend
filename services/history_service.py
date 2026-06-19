@@ -94,18 +94,16 @@ class HistoryService:
 
         messages = []
         for msg in stored:
-            content_parts = [{"type": "text", "text": msg.get("content", "")}]
+            text_content = msg.get("content", "")
+            
+            # Reconstruct the sandbox note for historical messages
             if msg.get("attachments"):
-                for att in msg["attachments"]:
-                    uri = att.get("gemini_uri") or att.get("uri")
-                    if uri:
-                        content_parts.append({
-                            "type": "file",
-                            "file_id": uri,
-                            "mime_type": att.get("mime_type")
-                        })
+                file_list = ", ".join(a.get('sandbox_path', f"uploads/{a.get('original_name', 'file')}") for a in msg["attachments"])
+                note = f"\n\n[Uploaded file(s) available in your sandbox at: {file_list}]"
+                text_content += note
+
             if msg["role"] == "user":
-                messages.append(HumanMessage(content=content_parts if len(content_parts) > 1 else msg.get("content", "")))
+                messages.append(HumanMessage(content=text_content))
             else:
                 messages.append(AIMessage(content=msg.get("content", "")))
 
