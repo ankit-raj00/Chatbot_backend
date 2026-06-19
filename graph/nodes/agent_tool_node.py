@@ -114,7 +114,11 @@ async def agent_tool_node(state: ChatState, config: RunnableConfig) -> dict:
                 ws = workspace_for(user_id)
                 touch_last_active(user_id, _infer_project_type(ws))
                 
-            return ToolMessage(content=str(output), name=name, tool_call_id=call_id, status="success")
+            # If the tool returned a list (multimodal content parts, e.g. from
+            # read_file_natively), pass it directly so the LLM receives the
+            # actual image/file data.  For everything else, stringify as before.
+            tool_content = output if isinstance(output, list) else str(output)
+            return ToolMessage(content=tool_content, name=name, tool_call_id=call_id, status="success")
         except Exception as e:
             return ToolMessage(content=f"Error executing {name}: {e}", name=name, tool_call_id=call_id, status="error")
 
