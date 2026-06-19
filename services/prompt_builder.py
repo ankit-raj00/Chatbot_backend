@@ -80,6 +80,8 @@ class PromptBuilder:
             section += f"- {mem.get('topic', '')}: {mem.get('content', '')}\n"
         return section + "\n"
 
+
+
     @classmethod
     def assemble(
         cls,
@@ -89,10 +91,7 @@ class PromptBuilder:
         user_memories: list[dict] = None,
     ) -> str:
         """Assemble the complete system prompt from all sections."""
-        core = cls.build_core_system_prompt(enabled_tools)
-        mcp = cls.build_mcp_context_section(
-            mcp_resources or [],
-            mcp_prompts or []
-        )
+        core   = cls.build_core_system_prompt(enabled_tools)
+        mcp    = cls.build_mcp_context_section(mcp_resources or [], mcp_prompts or [])
         memory = cls.build_memory_section(user_memories or [])
         return f"{core}\n{memory}{mcp}".strip()

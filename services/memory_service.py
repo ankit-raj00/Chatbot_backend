@@ -151,6 +151,44 @@ class MemoryService:
             logger.warning(f"Memory extraction failed for {user_id} (non-fatal): {e}")
 
     @staticmethod
+    async def get_relevant_memories(user_id: str, current_message: str, top_k: int = 5) -> list[dict]:
+        """
+        Return only the memories most relevant to the current message.
+        Uses embedding cosine similarity. Falls back to get_user_memories on error.
+        More efficient than injecting all memories — scales to 100s of memories.
+        """
+        import asyncio
+        import numpy as np
+
+        all_mems = await MemoryService.get_user_memories(user_id)
+        if len(all_mems) <= top_k:
+            return all_mems  # no point filtering small sets
+
+        try:
+            from langchain_google_genai import GoogleGenerativeAIEmbeddings
+            import os
+
+            emb = GoogleGenerativeAIEmbeddings(
+                model="models/gemini-embedding-001",
+                google_api_key=os.getenv("GOOGLE_API_KEY"),
+                output_dimensionality=768,
+            )
+            texts = [f"{m.get('topic', '')}: {m.get('content', '')}" for m in all_mems]
+            q_emb, m_embs = await asyncio.gather(
+                emb.aembed_query(current_message[:500]),
+                emb.aembed_documents(texts),
+            )
+            q = np.array(q_emb)
+            scored = sorted(
+                zip([float(np.dot(q, np.array(me))) for me in m_embs], all_mems),
+                reverse=True,
+            )
+            return [m for _, m in scored[:top_k]]
+        except Exception as e:
+            logger.warning(f"Semantic memory retrieval failed: {e}")
+            return all_mems[:top_k]
+
+    @staticmethod
     async def clear_user_memories(user_id: str) -> None:
         """Delete all memories for a user. Callable from an API endpoint."""
         await user_memories_collection.delete_one({"user_id": user_id})
