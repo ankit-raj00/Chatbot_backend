@@ -15,7 +15,7 @@ class ChatRequest(BaseModel):
     message: str
     conversation_id: str | None = None
     mcp_server_urls: List[str] = []
-    model: str = "gemini-2.5-flash"
+    model: str = "gemini-3.1-flash-lite"
     enabled_tools: List[str] = []
     selected_files: List[str] = []
 
@@ -48,7 +48,7 @@ async def chat_stream_multimodal(
     message: str = Form(...),
     conversation_id: str = Form(None),
     mcp_server_urls: str = Form(None), # JSON string
-    model: str = Form("gemini-2.5-flash"),
+    model: str = Form("gemini-3.1-flash-lite"),
     images: List[UploadFile] = File(None),
     enabled_tools: str = Form(None), # JSON string
     selected_files: str = Form(None), # JSON string
