@@ -147,22 +147,11 @@ class ChatController:
                 try:
                     gemini_file = self.gemini_client.files.upload(file=tmp_path)
                     
-                    # Instead of 'type': 'file', we just provide the info so the agent knows to read it
-                    # OR we can try passing it as image_url if it's an image
-                    if file_obj.content_type.startswith("image/"):
-                        content_parts.append({
-                            "type": "image_url",
-                            "image_url": gemini_file.uri
-                        })
-                    elif file_obj.content_type == "application/pdf":
-                        # LangChain Google GenAI supports PDFs via image_url (uri)
-                        content_parts.append({
-                            "type": "image_url",
-                            "image_url": gemini_file.uri
-                        })
-                    else:
-                        # For CSVs, Excels, etc. the sandbox note is enough for the agent
-                        pass
+                    content_parts.append({
+                        "type": "file",
+                        "file_id": gemini_file.uri,
+                        "mime_type": gemini_file.mime_type
+                    })
                         
                     attachments.append({
                         "type": "file",
