@@ -57,6 +57,9 @@ class ChatController:
         if files:
             files_content_parts, attachments = await self._process_uploads(user_id, files)
 
+        # Restore missing outputs from Cloudinary before running the agent
+        await self._restore_missing_outputs(user_id)
+
         # Delegate all streaming logic to ChatService
         async for chunk in ChatService.stream(
             user_id=user_id,
@@ -70,6 +73,32 @@ class ChatController:
             attachments=attachments,
         ):
             yield chunk
+
+    async def _restore_missing_outputs(self, user_id: str):
+        """Restore any missing generated files from Cloudinary before agent runs."""
+        from core.database import user_outputs_collection
+        from utils.workspace import workspace_for
+        from utils.cloudinary_handler import CloudinaryHandler
+        
+        ws_dir = workspace_for(user_id)
+        outputs_dir = ws_dir / "outputs"
+        
+        try:
+            cloudinary = CloudinaryHandler()
+            
+            # Get all files tracked for this user
+            cursor = user_outputs_collection.find({"user_id": user_id})
+            async for output_doc in cursor:
+                filename = output_doc.get("filename")
+                cloudinary_url = output_doc.get("cloudinary_url")
+                
+                if filename and cloudinary_url:
+                    local_path = outputs_dir / filename
+                    if not local_path.exists():
+                        logger.info(f"Restoring missing file {filename} from Cloudinary")
+                        await cloudinary.download_file(cloudinary_url, target_path=str(local_path))
+        except Exception as e:
+            logger.warning(f"Failed to restore missing outputs from Cloudinary: {e}")
 
     def _save_to_sandbox(self, user_id: str, filename: str, content: bytes) -> str:
         """Copy uploaded file into the user's sandbox uploads/ dir.
