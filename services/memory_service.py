@@ -80,13 +80,15 @@ class MemoryService:
             from langchain_google_genai import ChatGoogleGenerativeAI
             import json
 
+            from config.model_config import ModelConfig
+            
             conversation_text = (
                 f"User: {human_message[:500]}\n"
                 f"Assistant: {ai_response[:500]}"
             )
 
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash-lite",   # Use the cheapest model for this
+                model=ModelConfig.MEMORY_EXTRACTION_MODEL,   # Now configurable via model_config.py
                 temperature=0,
                 google_api_key=os.getenv("GOOGLE_API_KEY"),
             )
