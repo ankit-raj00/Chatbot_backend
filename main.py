@@ -360,6 +360,16 @@ async def health_check():
         }
     )
 
+@app.get("/api/outputs/my/{filename}")
+async def redirect_legacy_outputs(filename: str):
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=f"/outputs/my/{filename}")
+
+@app.get("/api/outputs/download/{user_id}/{filename}")
+async def redirect_legacy_downloads(user_id: str, filename: str):
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=f"/outputs/download/{user_id}/{filename}")
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
