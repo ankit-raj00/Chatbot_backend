@@ -61,6 +61,9 @@ class ModelConfig:
     # Default model — highest quota, lowest latency
     DEFAULT_MODEL = "gemini-3.1-flash-lite"
     
+    # Model used by MemoryService to extract durable facts silently in the background
+    MEMORY_EXTRACTION_MODEL = "gemini-3.1-flash-lite"
+    
     @classmethod
     def get_model_info(cls, model_id: str) -> Dict[str, Any]:
         """Get information about a specific model"""
