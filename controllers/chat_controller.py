@@ -137,25 +137,44 @@ class ChatController:
                     tmp_path = tmp.name
 
                 sandbox_path = self._save_to_sandbox(user_id, file_obj.filename, content)
-                cloudinary_url, public_id = await cloudinary.upload_file(tmp_path)
-                gemini_file = self.gemini_client.files.upload(file=tmp_path)
+                
+                cloudinary_url, public_id = None, None
+                try:
+                    cloudinary_url, public_id = await cloudinary.upload_file(tmp_path)
+                except Exception as e:
+                    logger.error(f"Cloudinary upload failed for {file_obj.filename}: {e}")
+                
+                try:
+                    gemini_file = self.gemini_client.files.upload(file=tmp_path)
+                    
+                    # We no longer automatically inject files into content_parts here.
+                    # Instead, we just pass the info to the sandbox. The LLM can use a tool
+                    # to read the file natively if it chooses to do so.
+                        
+                    attachments.append({
+                        "type": "file",
+                        "original_name": file_obj.filename,
+                        "mime_type": gemini_file.mime_type,
+                        "cloudinary_url": cloudinary_url,
+                        "cloudinary_public_id": public_id,
+                        "gemini_uri": gemini_file.uri,
+                        "gemini_name": gemini_file.name,
+                        "gemini_uploaded_at": datetime.now(),
+                        "sandbox_path": sandbox_path
+                    })
+                except Exception as e:
+                    logger.error(f"Gemini File API upload failed for {file_obj.filename}: {e}")
+                    # Still add attachment so the sandbox file is known
+                    attachments.append({
+                        "type": "file",
+                        "original_name": file_obj.filename,
+                        "mime_type": file_obj.content_type,
+                        "cloudinary_url": cloudinary_url,
+                        "cloudinary_public_id": public_id,
+                        "sandbox_path": sandbox_path
+                    })
 
-                content_parts.append({
-                    "type": "file",
-                    "file_id": gemini_file.uri,
-                    "mime_type": gemini_file.mime_type
-                })
-                attachments.append({
-                    "type": "file",
-                    "original_name": file_obj.filename,
-                    "mime_type": gemini_file.mime_type,
-                    "cloudinary_url": cloudinary_url,
-                    "cloudinary_public_id": public_id,
-                    "gemini_uri": gemini_file.uri,
-                    "gemini_name": gemini_file.name,
-                    "gemini_uploaded_at": datetime.now(),
-                    "sandbox_path": sandbox_path
-                })
+
             finally:
                 if tmp_path and os.path.exists(tmp_path):
                     try:
