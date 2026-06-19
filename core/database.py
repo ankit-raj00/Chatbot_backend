@@ -25,3 +25,4 @@ oauth_tokens_collection = db["oauth_tokens"]
 tools_collection = db["tools"]
 doc_store_collection = db["doc_store"]
 user_memories_collection = db["user_memories"]
+user_skills_collection = db["user_skills"]        # Phase 2b: skill vault

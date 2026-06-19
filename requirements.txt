@@ -35,6 +35,38 @@ redis[hiredis]>=5.0.0
 slowapi>=0.1.9
 structlog>=24.0.0
 langsmith>=0.1.0
+
+# ─── Phase 1: Supervisor + Checkpointing ─────────────────────
+langgraph-checkpoint-redis
+
+# ─── Phase 2b: Skills system ─────────────────────────────────
+PyYAML
+
+# ─── Phase 3: Tool system ─────────────────────────────────────
+numpy
+
+# ─── Phase 4: Document generation ────────────────────────────
+python-docx
+python-pptx
+openpyxl
+weasyprint
+reportlab>=4.0.0
+fpdf2>=2.7.0
+
+# ─── Phase 5: RAG improvements ───────────────────────────────
+# (uses langchain-google-genai embeddings already listed)
+
+# ─── Phase 6: Universal file reader ──────────────────────────
+pdfminer.six
+beautifulsoup4
+
+# ─── Phase 2b: Data analysis ─────────────────────────────────
+pandas
+
+# ─── Testing ─────────────────────────────────────────────────
+pytest
+pytest-asyncio
+
 # Optional heavy dependencies (disabled for Vercel 500MB lambda limit)
 # unstructured
 # langchain-unstructured

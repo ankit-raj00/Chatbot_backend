@@ -2,7 +2,7 @@ import logging
 from langgraph.graph import END, StateGraph
 from rag.graph.state import RAGGraphState
 from rag.graph.nodes.retrieval_node import RetrievalNode, parallel_retrieve_node
-from rag.graph.nodes.grader_node import GraderNode
+from rag.graph.nodes.embedding_grader_node import EmbeddingGraderNode
 from rag.graph.nodes.agent_node import AgentNode
 from rag.graph.nodes.hallucination_node import HallucinationNode
 from rag.graph.nodes.web_search_node import WebSearchNode
@@ -21,7 +21,7 @@ class RAGWorkflow:
     def __init__(self):
         # Initialize Nodes
         self.retriever = RetrievalNode()
-        self.grader = GraderNode()
+        self.grader = EmbeddingGraderNode()
         self.agent = AgentNode()
         self.hallucinator = HallucinationNode()
         self.web_search = WebSearchNode()
