@@ -158,7 +158,7 @@ class ChatService:
             # ── Step 6: Build supervisor input ──────────────────────────
             current_content = [{"type": "text", "text": message}] + files_content_parts
             if attachments:
-                file_list = ", ".join(f"uploads/{a.get('original_name', 'file')}" for a in attachments)
+                file_list = ", ".join(a.get('sandbox_path', f"uploads/{a.get('original_name', 'file')}") for a in attachments)
                 note = f"\n\n[Uploaded file(s) available in your sandbox at: {file_list}]"
                 current_content[0]["text"] += note
                 message += note
