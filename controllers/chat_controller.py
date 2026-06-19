@@ -147,11 +147,9 @@ class ChatController:
                 try:
                     gemini_file = self.gemini_client.files.upload(file=tmp_path)
                     
-                    content_parts.append({
-                        "type": "file",
-                        "file_id": gemini_file.uri,
-                        "mime_type": gemini_file.mime_type
-                    })
+                    # We no longer automatically inject files into content_parts here.
+                    # Instead, we just pass the info to the sandbox. The LLM can use a tool
+                    # to read the file natively if it chooses to do so.
                         
                     attachments.append({
                         "type": "file",
