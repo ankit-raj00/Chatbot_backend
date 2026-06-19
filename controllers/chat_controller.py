@@ -55,7 +55,7 @@ class ChatController:
         files_content_parts = []
 
         if files:
-            files_content_parts, attachments = await self._process_uploads(files)
+            files_content_parts, attachments = await self._process_uploads(user_id, files)
 
         # Delegate all streaming logic to ChatService
         async for chunk in ChatService.stream(
@@ -71,7 +71,26 @@ class ChatController:
         ):
             yield chunk
 
-    async def _process_uploads(self, files: list) -> tuple[list[dict], list[dict]]:
+    def _save_to_sandbox(self, user_id: str, filename: str, content: bytes) -> str:
+        """Copy uploaded file into the user's sandbox uploads/ dir.
+        Returns the path relative to the sandbox root (e.g. 'uploads/report.zip')."""
+        from utils.workspace import workspace_for
+        
+        uploads_dir = workspace_for(user_id) / "uploads"
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+
+        dest = uploads_dir / filename
+        if dest.exists():
+            stem, ext = dest.stem, dest.suffix
+            i = 1
+            while dest.exists():
+                dest = uploads_dir / f"{stem}_{i}{ext}"
+                i += 1
+
+        dest.write_bytes(content)
+        return f"uploads/{dest.name}"
+
+    async def _process_uploads(self, user_id: str, files: list) -> tuple[list[dict], list[dict]]:
         """Upload files to Gemini Files API and Cloudinary. Returns (content_parts, attachments)."""
         from utils.cloudinary_handler import CloudinaryHandler
         cloudinary = CloudinaryHandler()
@@ -88,6 +107,7 @@ class ChatController:
                     tmp.write(content)
                     tmp_path = tmp.name
 
+                sandbox_path = self._save_to_sandbox(user_id, file_obj.filename, content)
                 cloudinary_url, public_id = await cloudinary.upload_file(tmp_path)
                 gemini_file = self.gemini_client.files.upload(file=tmp_path)
 
@@ -104,7 +124,8 @@ class ChatController:
                     "cloudinary_public_id": public_id,
                     "gemini_uri": gemini_file.uri,
                     "gemini_name": gemini_file.name,
-                    "gemini_uploaded_at": datetime.now()
+                    "gemini_uploaded_at": datetime.now(),
+                    "sandbox_path": sandbox_path
                 })
             finally:
                 if tmp_path and os.path.exists(tmp_path):

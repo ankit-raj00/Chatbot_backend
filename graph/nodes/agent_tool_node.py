@@ -17,6 +17,15 @@ from tools import AVAILABLE_TOOLS, get_tool
 from utils.mcp_connection_manager import mcp_manager
 from utils.hooks import run_pre_tool_hooks, run_post_tool_hooks, ToolTimer
 from utils.tool_result_cache import cached_invoke
+from pathlib import Path
+
+
+def _infer_project_type(cwd_path: Path) -> str:
+    if (cwd_path / "package.json").exists():
+        return "node"
+    if (cwd_path / "requirements.txt").exists() or (cwd_path / ".venv").exists():
+        return "python"
+    return "generic"
 
 
 async def _build_tool_map(state: ChatState, config: RunnableConfig) -> dict:
@@ -91,6 +100,13 @@ async def agent_tool_node(state: ChatState, config: RunnableConfig) -> dict:
             with ToolTimer() as timer:
                 output = await cached_invoke(name, args, _run)
             await run_post_tool_hooks(name, output, timer.elapsed_ms, user_id)
+            
+            if name in ("run_python", "run_shell"):
+                from utils.workspace import workspace_for
+                from utils.workspace_cleanup import touch_last_active
+                ws = workspace_for(user_id)
+                touch_last_active(user_id, _infer_project_type(ws))
+                
             return ToolMessage(content=str(output), name=name, tool_call_id=call_id, status="success")
         except Exception as e:
             return ToolMessage(content=f"Error executing {name}: {e}", name=name, tool_call_id=call_id, status="error")

@@ -15,14 +15,13 @@ from core.middleware import get_current_user
 
 router = APIRouter(prefix="/outputs", tags=["Outputs"])
 
-_DEFAULT_WS = str(Path.home() / "agentx_workspace")
-OUTPUTS_DIR = Path(os.getenv("WORKSPACE_ROOT", _DEFAULT_WS))
-OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+from utils.workspace import workspace_for, WORKSPACE_ROOT as OUTPUTS_DIR
 
 ALLOWED_EXT = {".pdf", ".docx", ".pptx", ".xlsx", ".csv", ".txt", ".html", ".svg", ".png", ".jpg", ".md", ".json"}
 
 def _user_dir(user_id: str) -> Path:
-    p = OUTPUTS_DIR / user_id
+    # Outputs are in the outputs/ subfolder of the user's workspace
+    p = workspace_for(user_id) / "outputs"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -121,6 +120,18 @@ async def download_output(
     )
 
 
+@router.delete("/sandbox")
+async def reset_sandbox(current_user: dict = Depends(get_current_user)):
+    """Wipe the current user's entire sandbox (uploads, outputs, work, venv, caches).
+    Use if the environment gets into a bad state (corrupted venv, disk full, etc.)."""
+    import shutil
+    user_id = str(current_user["_id"])
+    ws = workspace_for(user_id)
+    if ws.exists():
+        shutil.rmtree(ws)
+    return {"success": True, "message": "Sandbox reset. A fresh environment will be created on next use."}
+
+
 @router.delete("/{filename}")
 async def delete_output(filename: str, current_user: dict = Depends(get_current_user)):
     """Delete a generated output file."""
@@ -130,3 +141,4 @@ async def delete_output(filename: str, current_user: dict = Depends(get_current_
         raise HTTPException(status_code=404, detail="File not found")
     file_path.unlink()
     return {"success": True, "filename": filename}
+

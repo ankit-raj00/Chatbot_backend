@@ -38,6 +38,15 @@ class ModelConfig:
             "context_window": 1000000,
         },
 
+        "gemini-3.1-flash-lite": {
+            "name": "Gemini 3.1 Flash Lite",
+            "description": "Latest fast model",
+            "supports_images": True,
+            "supports_video": True,
+            "supports_audio": True,
+            "max_tokens": 8192,
+            "context_window": 1000000,
+        },
         "gemini-flash-latest": {
             "name": "Gemini Flash (Latest)",
             "description": "Latest flash model with newest features",
@@ -50,7 +59,7 @@ class ModelConfig:
     }
 
     # Default model — highest quota, lowest latency
-    DEFAULT_MODEL = "gemini-2.5-flash-lite"
+    DEFAULT_MODEL = "gemini-3.1-flash-lite"
     
     @classmethod
     def get_model_info(cls, model_id: str) -> Dict[str, Any]:

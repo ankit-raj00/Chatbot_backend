@@ -15,8 +15,12 @@ Flow:
 
 import json
 import logging
+import asyncio
 from datetime import datetime
 from bson import ObjectId
+
+from config.model_config import ModelConfig
+DEFAULT_MODEL = ModelConfig.DEFAULT_MODEL
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -79,7 +83,7 @@ class ChatService:
         message: str,
         conversation_id: str | None = None,
         mcp_server_urls: list[str] | None = None,
-        model: str = "gemini-2.5-flash",
+        model: str = DEFAULT_MODEL,
         enabled_tools: list[str] | None = None,
         selected_files: list[str] | None = None,
         files_content_parts: list[dict] | None = None,
@@ -133,6 +137,12 @@ class ChatService:
 
             # ── Step 6: Build supervisor input ──────────────────────────
             current_content = [{"type": "text", "text": message}] + files_content_parts
+            if attachments:
+                file_list = ", ".join(f"uploads/{a.get('original_name', 'file')}" for a in attachments)
+                note = f"\n\n[Uploaded file(s) available in your sandbox at: {file_list}]"
+                current_content[0]["text"] += note
+                message += note
+
             input_message   = HumanMessage(
                 content=current_content if files_content_parts else message
             )
@@ -179,6 +189,18 @@ class ChatService:
 
             agent_graph = await get_agent_graph()
 
+            # Snapshot existing files BEFORE agent runs — name -> mtime, so we catch
+            # both brand-new files AND overwritten files (same name, updated content)
+            from utils.workspace import workspace_for as _ws_for
+            _CREATED_EXT = {".pdf", ".docx", ".pptx", ".xlsx", ".csv", ".txt", ".html", ".png", ".jpg", ".svg", ".md", ".json"}
+            _outputs_dir = _ws_for(user_id) / "outputs"
+            _outputs_dir.mkdir(parents=True, exist_ok=True)
+            _files_before = {
+                f.name: f.stat().st_mtime
+                for f in _outputs_dir.iterdir()
+                if f.is_file() and f.suffix.lower() in _CREATED_EXT
+            }
+
             async for event in agent_graph.astream_events(agent_input, version="v2", config=config):
                 if not isinstance(event, dict):
                     continue
@@ -214,7 +236,13 @@ class ChatService:
                     if tool_name == "load_skill":
                         skill_name = (tool_args or {}).get("skill_name", "")
                         if skill_name:
-                            skill_data = {'name': skill_name, 'content': ''}
+                            # Load the actual SKILL.md content so the frontend can display it
+                            try:
+                                from skills.skill_loader import load_builtin_skill
+                                skill_content = load_builtin_skill(skill_name) or ''
+                            except Exception:
+                                skill_content = ''
+                            skill_data = {'name': skill_name, 'content': skill_content}
                             skills.append(skill_data)
                             yield f"data: {json.dumps({'skill_used': skill_data})}\n\n"
 
@@ -270,6 +298,11 @@ class ChatService:
                                 step["result"] = str(output)
                                 step["status"] = "completed"
                                 break
+                                
+                elif event_type == "on_custom_event" and event.get("name") == "exec_output":
+                    data = event.get("data", {})
+                    yield f"data: {json.dumps({'exec_output': data})}\n\n"
+
 
                 # Token tracking and final text fallback
                 elif event_type == "on_chat_model_end" and node_name == "agent_node":
@@ -301,18 +334,17 @@ class ChatService:
                             output_tokens=usage.get("output_tokens", 0),
                         )
 
-            # ── Step 7b: Detect files created during agent execution ──────────────────
+            # ── Step 7b: Detect files created/updated during this agent run ──────
             created_files = []
             try:
-                import time as _time
-                from utils.workspace import workspace_for as _ws_for
-                user_ws = _ws_for(user_id)
-                cutoff = _time.time() - 300  # files created in last 5 minutes
-                CREATED_EXT = {".pdf", ".docx", ".pptx", ".xlsx", ".csv", ".txt", ".html", ".png", ".jpg", ".svg", ".md", ".json"}
-
-                if user_ws.exists():
-                    for f in sorted(user_ws.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-                        if f.is_file() and f.stat().st_mtime > cutoff and f.suffix.lower() in CREATED_EXT:
+                if _outputs_dir.exists():
+                    for f in sorted(_outputs_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+                        if not f.is_file() or f.suffix.lower() not in _CREATED_EXT:
+                            continue
+                        prev_mtime = _files_before.get(f.name)
+                        curr_mtime = f.stat().st_mtime
+                        # Show if: file is brand-new OR file was overwritten (mtime changed)
+                        if prev_mtime is None or curr_mtime > prev_mtime:
                             created_files.append({
                                 "name":         f.name,
                                 "size_bytes":   f.stat().st_size,
