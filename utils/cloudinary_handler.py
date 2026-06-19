@@ -46,15 +46,16 @@ class CloudinaryHandler:
             print(f"Cloudinary upload error: {e}")
             raise
     
-    async def download_file(self, cloudinary_url: str) -> str:
+    async def download_file(self, cloudinary_url: str, target_path: str = None) -> str:
         """
         Download a file from Cloudinary to a temporary location asynchronously
         
         Args:
             cloudinary_url: The Cloudinary URL to download from
+            target_path: Optional destination path to save to instead of tempfile
         
         Returns:
-            Path to the downloaded temporary file
+            Path to the downloaded temporary file (or target_path)
         """
         try:
             # Download file in a separate thread
@@ -65,11 +66,19 @@ class CloudinaryHandler:
                 # Extract file extension from URL
                 extension = cloudinary_url.split('.')[-1].split('?')[0]
                 
-                # Save to temp file
-                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{extension}") as tmp:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        tmp.write(chunk)
-                    return tmp.name
+                if target_path:
+                    # Save directly to target_path
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    with open(target_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    return target_path
+                else:
+                    # Save to temp file
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{extension}") as tmp:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            tmp.write(chunk)
+                        return tmp.name
 
             return await asyncio.to_thread(_download)
         except Exception as e:

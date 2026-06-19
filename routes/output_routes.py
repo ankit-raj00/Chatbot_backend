@@ -31,16 +31,33 @@ async def list_outputs(current_user: dict = Depends(get_current_user)):
     """List all generated output files for the current user."""
     user_id  = str(current_user["_id"])
     user_dir = _user_dir(user_id)
-    files = []
+    files_dict = {}
+    
+    from core.database import user_outputs_collection
+    cursor = user_outputs_collection.find({"user_id": user_id})
+    async for output_doc in cursor:
+        filename = output_doc.get("filename")
+        if filename:
+            dt = output_doc.get("updated_at") or output_doc.get("created_at")
+            files_dict[filename] = {
+                "filename": filename,
+                "size_bytes": output_doc.get("size_bytes", 0),
+                "download_url": f"/outputs/download/{user_id}/{filename}",
+                "created_at": dt.timestamp() if hasattr(dt, "timestamp") else 0
+            }
+            
     if user_dir.exists():
-        for f in sorted(user_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+        for f in user_dir.iterdir():
             if f.is_file() and f.suffix.lower() in ALLOWED_EXT:
-                files.append({
+                files_dict[f.name] = {
                     "filename":   f.name,
                     "size_bytes": f.stat().st_size,
                     "created_at": f.stat().st_mtime,
-                    "download_url": f"/api/outputs/download/{user_id}/{f.name}",
-                })
+                    "download_url": f"/outputs/download/{user_id}/{f.name}",
+                }
+                
+    files = list(files_dict.values())
+    files.sort(key=lambda x: x["created_at"], reverse=True)
     return {"files": files}
 
 @router.get("/my")
@@ -48,16 +65,35 @@ async def list_my_outputs(current_user: dict = Depends(get_current_user)):
     """List all generated files for the current user (JWT auth only, no user_id in URL)."""
     user_id  = str(current_user["_id"])
     user_dir = _user_dir(user_id)
-    files = []
+    files_dict = {}
+    
+    # 1. Get from MongoDB (Cloudinary files)
+    from core.database import user_outputs_collection
+    cursor = user_outputs_collection.find({"user_id": user_id})
+    async for output_doc in cursor:
+        filename = output_doc.get("filename")
+        if filename:
+                dt = output_doc.get("updated_at") or output_doc.get("created_at")
+                files_dict[filename] = {
+                    "filename": filename,
+                    "size_bytes": output_doc.get("size_bytes", 0),
+                    "download_url": f"/outputs/my/{filename}",
+                    "created_at": dt.timestamp() if hasattr(dt, "timestamp") else 0
+                }
+            
+    # 2. Get from local disk (may have newer/un-uploaded files)
     if user_dir.exists():
-        for f in sorted(user_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+        for f in user_dir.iterdir():
             if f.is_file() and f.suffix.lower() in ALLOWED_EXT:
-                files.append({
+                files_dict[f.name] = {
                     "filename":     f.name,
                     "size_bytes":   f.stat().st_size,
-                    "download_url": f"/api/outputs/my/{f.name}",
+                    "download_url": f"/outputs/my/{f.name}",
                     "created_at":   f.stat().st_mtime,
-                })
+                }
+                
+    files = list(files_dict.values())
+    files.sort(key=lambda x: x["created_at"], reverse=True)
     return {"files": files}
 
 
@@ -76,7 +112,14 @@ async def download_my_output(
     file_path = _user_dir(user_id) / filename
     
     if not file_path.exists():
+        # Fallback to Cloudinary
+        from core.database import user_outputs_collection
+        from fastapi.responses import RedirectResponse
+        output_doc = await user_outputs_collection.find_one({"user_id": user_id, "filename": filename})
+        if output_doc and output_doc.get("cloudinary_url"):
+            return RedirectResponse(url=output_doc.get("cloudinary_url"))
         raise HTTPException(status_code=404, detail=f"File '{filename}' not found.")
+        
     if file_path.suffix.lower() not in ALLOWED_EXT:
         raise HTTPException(status_code=400, detail="File type not permitted")
     try:
@@ -104,7 +147,16 @@ async def download_output(
         raise HTTPException(status_code=403, detail="Access denied")
 
     file_path = _user_dir(user_id) / filename
-    if not file_path.exists() or file_path.suffix.lower() not in ALLOWED_EXT:
+    if not file_path.exists():
+        # Fallback to Cloudinary
+        from core.database import user_outputs_collection
+        from fastapi.responses import RedirectResponse
+        output_doc = await user_outputs_collection.find_one({"user_id": user_id, "filename": filename})
+        if output_doc and output_doc.get("cloudinary_url"):
+            return RedirectResponse(url=output_doc.get("cloudinary_url"))
+        raise HTTPException(status_code=404, detail="File not found")
+        
+    if file_path.suffix.lower() not in ALLOWED_EXT:
         raise HTTPException(status_code=404, detail="File not found")
 
     # Security: no path traversal
