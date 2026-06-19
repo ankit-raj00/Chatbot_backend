@@ -12,7 +12,6 @@ from tools.utilities.get_time import get_current_time
 from tools.utilities.get_weather import get_weather
 from tools.utilities.read_mcp_resource import read_mcp_resource
 from tools.utilities.execute_code import execute_code
-from tools.utilities.read_file_natively import read_file_natively
 from rag.tools.retrieval_tool import search_knowledge_base
 from rag.tools.doc_store_tools import read_document_page
 
@@ -25,7 +24,6 @@ AVAILABLE_TOOLS: Dict[str, Any] = {
     "get_weather": get_weather,
     "read_mcp_resource": read_mcp_resource,
     "execute_code": execute_code,
-    "read_file_natively": read_file_natively,
     "search_knowledge_base": search_knowledge_base,
     "read_document_page": read_document_page,
 }
@@ -39,7 +37,6 @@ TOOL_METADATA = {
     "get_weather": {"category": "utilities", "requires_auth": False},
     "read_mcp_resource": {"category": "utilities", "requires_auth": False},
     "execute_code": {"category": "utilities", "requires_auth": False},
-    "read_file_natively": {"category": "utilities", "requires_auth": False},
     "search_knowledge_base": {"category": "rag", "requires_auth": False},
     "read_document_page": {"category": "rag", "requires_auth": False},
 }
