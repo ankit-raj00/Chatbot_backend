@@ -22,6 +22,7 @@ langchain-google-genai
 langchain-openai
 langgraph
 langchain-mcp-adapters==0.3.0
+mcp==1.27.2
 cryptography
 httpx
 llama-parse
