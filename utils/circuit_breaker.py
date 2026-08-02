@@ -40,6 +40,7 @@ class CircuitBreaker:
         self._failures         = 0
         self._last_fail: float = 0.0
         self._lock             = asyncio.Lock()
+        self._probe_in_flight  = False   # True while a single HALF_OPEN probe runs
 
     @property
     def state(self) -> CircuitState:
@@ -57,11 +58,13 @@ class CircuitBreaker:
                 logger.info(f"circuit_breaker.closed name={self.name}")
             self._failures = 0
             self._state    = CircuitState.CLOSED
+            self._probe_in_flight = False
 
     async def _on_failure(self):
         async with self._lock:
             self._failures  += 1
             self._last_fail  = time.monotonic()
+            self._probe_in_flight = False
             if (self._state == CircuitState.HALF_OPEN or
                     self._failures >= self.failure_threshold):
                 self._state = CircuitState.OPEN
@@ -73,12 +76,21 @@ class CircuitBreaker:
         async with self._lock:
             if self._should_recover():
                 self._state = CircuitState.HALF_OPEN
+                self._probe_in_flight = False
                 logger.info(f"circuit_breaker.half_open name={self.name}")
             if self._state == CircuitState.OPEN:
                 retry_in = self.recovery_timeout - (time.monotonic() - self._last_fail)
                 raise ServiceUnavailableError(
                     f"'{self.name}' circuit OPEN — retry in {max(0, retry_in):.0f}s"
                 )
+            if self._state == CircuitState.HALF_OPEN:
+                # Admit exactly ONE probe request; reject the rest so a recovering
+                # service isn't hit by a thundering herd during the test window.
+                if self._probe_in_flight:
+                    raise ServiceUnavailableError(
+                        f"'{self.name}' circuit HALF_OPEN — probe in progress, retry shortly"
+                    )
+                self._probe_in_flight = True
 
         try:
             result = await fn(*args, **kwargs)
@@ -101,4 +113,4 @@ class CircuitBreaker:
 # ── Pre-built singletons for each external service ─────────────────────────────
 gemini_breaker = CircuitBreaker("gemini", failure_threshold=5,  recovery_timeout=60)
 qdrant_breaker  = CircuitBreaker("qdrant", failure_threshold=3,  recovery_timeout=30)
-tavily_breaker  = CircuitBreaker("tavily", failure_threshold=5,  recovery_timeout=120)
+web_search_breaker = CircuitBreaker("web_search", failure_threshold=5,  recovery_timeout=120)

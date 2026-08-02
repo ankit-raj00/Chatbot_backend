@@ -1,8 +1,17 @@
 """
 Graph Builder v3 — single ReAct agent.
 Replaces graph/supervisor.py and graph/builder.py (v2 flat-chat version).
+
+NOTE: the graph is compiled WITHOUT a persistent checkpointer. Conversation
+history is loaded fresh from MongoDB every turn (services/history_service.py) and
+passed as the graph input, so a cross-invocation checkpointer would be a *second*
+source of truth for the same messages. With `add_messages`, the reconstructed
+history (new message IDs each turn) would be APPENDED to the persisted state
+rather than merged — making state and token cost grow super-linearly and
+duplicating the system prompt. Dropping the checkpointer removes that entire
+class of bug. Intra-turn ReAct state (agent_node <-> agent_tool_node) still works
+because state persists for the duration of a single astream_events() call.
 """
-import os
 import structlog
 from langgraph.graph import StateGraph, START, END
 
@@ -11,8 +20,6 @@ from graph.nodes.agent_node import agent_node
 from graph.nodes.agent_tool_node import agent_tool_node
 
 logger = structlog.get_logger(__name__)
-
-REDIS_URL = os.getenv("REDIS_URL", "")
 
 
 def _route_after_agent(state: ChatState) -> str:
@@ -34,41 +41,18 @@ def _build_graph():
     return builder
 
 
-async def _init_checkpointer():
-    """Same Redis-or-MemorySaver pattern as old supervisor._init_checkpointer."""
-    if REDIS_URL:
-        try:
-            from langgraph.checkpoint.redis.aio import AsyncRedisSaver
-            cm = AsyncRedisSaver.from_conn_string(REDIS_URL)
-            checkpointer = await cm.__aenter__()
-            logger.info("agent_graph.checkpointer=redis")
-            return checkpointer, cm
-        except Exception as e:
-            logger.warning(f"Redis checkpointer failed ({e}) — using MemorySaver")
-    from langgraph.checkpoint.memory import MemorySaver
-    logger.info("agent_graph.checkpointer=memory")
-    return MemorySaver(), None
-
-
 _graph_instance = None
-_checkpointer = None
-_checkpointer_cm = None
 
 
 async def get_agent_graph():
-    global _graph_instance, _checkpointer, _checkpointer_cm
+    """Return the compiled (stateless-across-turns) agent graph, built once."""
+    global _graph_instance
     if _graph_instance is None:
-        _checkpointer, _checkpointer_cm = await _init_checkpointer()
-        _graph_instance = _build_graph().compile(checkpointer=_checkpointer)
-        logger.info("agent_graph.compiled")
+        _graph_instance = _build_graph().compile()
+        logger.info("agent_graph.compiled checkpointer=none")
     return _graph_instance
 
 
 async def close_agent_graph():
-    global _checkpointer_cm
-    if _checkpointer_cm is not None:
-        try:
-            await _checkpointer_cm.__aexit__(None, None, None)
-        except Exception as e:
-            logger.warning(f"agent_graph checkpointer close error: {e}")
-        _checkpointer_cm = None
+    """No-op — no checkpointer connection to close. Kept for lifespan compatibility."""
+    return None

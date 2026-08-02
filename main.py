@@ -39,6 +39,7 @@ from routes.admin_routes import router as admin_router
 from routes.skill_vault_routes import router as skill_vault_router
 from routes.agent_routes import router as agent_router
 from routes.output_routes import router as output_router
+from routes.parser_routes import router as parser_router
 
 from contextlib import asynccontextmanager
 
@@ -66,7 +67,7 @@ async def lifespan(app: FastAPI):
         """Create MongoDB indexes for query performance."""
         from core.database import (
             messages_collection, conversations_collection,
-            users_collection
+            users_collection, mcp_servers_collection, mcp_oauth_tokens_collection
         )
         # messages: fetch by conversation_id + user_id (most common query)
         await messages_collection.create_index(
@@ -78,6 +79,12 @@ async def lifespan(app: FastAPI):
         )
         # users: lookup by email
         await users_collection.create_index("email", unique=True)
+        # mcp servers: list by owner
+        await mcp_servers_collection.create_index([("user_id", 1), ("created_at", -1)])
+        # mcp oauth tokens: one credential bundle per (user, server)
+        await mcp_oauth_tokens_collection.create_index(
+            [("user_id", 1), ("server_id", 1)], unique=True
+        )
 
     try:
         await ensure_indexes()
@@ -161,10 +168,9 @@ async def lifespan(app: FastAPI):
 
     yield  # App is running
 
-    # Shutdown: Cleanup MCP connections
-    print("🧹 Shutting down: Cleaning up MCP connections")
-    from utils.mcp_connection_manager import mcp_manager
-    await mcp_manager.disconnect_all()
+    # No MCP shutdown step needed: langchain-mcp-adapters opens a fresh session
+    # per tool call rather than holding persistent connections open, so there's
+    # nothing to actively tear down here.
 
     # Shutdown: close agent checkpointer
     try:
@@ -296,6 +302,7 @@ app.include_router(admin_router)
 app.include_router(skill_vault_router)
 app.include_router(agent_router)
 app.include_router(output_router)
+app.include_router(parser_router)
 
 # Attach middlewares
 app.add_middleware(CorrelationIdMiddleware)

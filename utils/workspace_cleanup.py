@@ -16,14 +16,23 @@ logger = structlog.get_logger(__name__)
 INTERVAL_SECONDS = 3600  # run every hour
 
 # (directory_name, max_age_hours, "files" | "tree")
+# NOTE: the local workspace is a CACHE, not the source of truth — generated
+# outputs and uploads are also persisted to Cloudinary, so eviction here only
+# drops the fast local copy (re-hydrated on demand from Cloudinary when served).
+# "files" mode is now also gated on workspace idleness (see _cleanup), so an
+# actively-used workspace keeps its files locally regardless of file age.
 CLEANUP_POLICY = [
-    ("outputs",  6,   "files"),   # generated deliverables — short TTL
-    ("uploads",  72,  "files"),   # user uploads — longer grace period
-    ("work",     24,  "files"),   # scratch/intermediate files
-    (".venv",    168, "tree"),    # venv — wipe after 7 DAYS of inactivity
-    (".npm-global", 168, "tree"), # npm prefix — same
-    (".cache",   336, "tree"),    # pip/npm cache — 14 days
+    ("outputs",  168,  "files"),  # generated deliverables — keep 7d locally (durable copy in Cloudinary)
+    ("uploads",  168,  "files"),  # user uploads — keep 7d locally (durable copy in Cloudinary)
+    ("work",     48,   "files"),  # scratch/intermediate files
+    (".venv",    336,  "tree"),   # venv — wipe after 14 DAYS of inactivity
+    (".npm-global", 336, "tree"), # npm prefix — same
+    (".cache",   336,  "tree"),   # pip/npm cache — 14 days
 ]
+
+# Only reap "files"-mode dirs once the whole workspace has been idle this long.
+# Prevents deleting an active user's recent artifacts purely on file mtime.
+FILES_IDLE_GRACE_HOURS = 24
 
 
 def _read_last_active(user_dir: Path) -> float:
@@ -71,6 +80,10 @@ async def _cleanup():
                     except Exception as e:
                         logger.warning(f"workspace_cleanup.tree_remove_failed dir={target} error={e}")
             else:  # "files"
+                # Gate on workspace idleness: don't evict files from a workspace
+                # that's still in active use, even if individual files are old.
+                if idle_hours < FILES_IDLE_GRACE_HOURS:
+                    continue
                 cutoff = now - max_age_h * 3600
                 for fp in target.rglob("*"):
                     if fp.is_file() and fp.stat().st_mtime < cutoff:

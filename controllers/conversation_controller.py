@@ -36,7 +36,7 @@ class ConversationController:
             new_conv = {
                 "user_id": user_id,
                 "title": conversation.title,
-                "mcp_server_url": conversation.mcp_server_url,
+                "mcp_server_id": conversation.mcp_server_id,
                 "created_at": datetime.now(),
                 "updated_at": datetime.now()
             }

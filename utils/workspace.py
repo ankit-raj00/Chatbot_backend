@@ -27,21 +27,31 @@ def ensure_workspace():
 
 def venv_python_for(user_id: str) -> Path:
     """
-    Returns the path to the per-user venv's python executable,
-    creating the venv on first call.
+    Returns the path to the per-user venv's python executable, creating the venv
+    on first call.
+
+    NOTE: creating a venv is a slow, BLOCKING subprocess. Do not call this
+    directly from an async request path — offload it, e.g.
+    `await asyncio.to_thread(venv_python_for, user_id)` — so a first-time venv
+    build for one user doesn't stall the whole event loop for every other user.
     """
     import subprocess
     import sys
     ws = workspace_for(user_id)
     venv_dir = ws / ".venv"
-    if not venv_dir.exists():
-        subprocess.run(
-            [sys.executable, "-m", "venv", str(venv_dir)],
-            check=True, capture_output=True,
-        )
-    if os.name == "nt":
-        return venv_dir / "Scripts" / "python.exe"
-    return venv_dir / "bin" / "python"
+    python_path = (venv_dir / "Scripts" / "python.exe") if os.name == "nt" else (venv_dir / "bin" / "python")
+    if not python_path.exists():
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "venv", str(venv_dir)],
+                check=True, capture_output=True,
+            )
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"Failed to create venv for user {user_id}: "
+                f"{e.stderr.decode('utf-8', 'replace') if e.stderr else e}"
+            ) from e
+    return python_path
 
 
 def pip_cache_dir_for(user_id: str) -> Path:

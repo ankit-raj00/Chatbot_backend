@@ -30,5 +30,9 @@ class RAGGraphState(TypedDict):
     """List of file UUIDs to filter search context. Each UUID maps to a specific
     uploaded document via metadata.file_id stored in Qdrant."""
 
+    user_id: Optional[str]
+    """The authenticated user's id — MANDATORY tenancy filter for retrieval.
+    Without it, retrieval must return nothing rather than leak other users' data."""
+
     messages: List[BaseMessage]
     """Agent scratchpad / conversation history."""

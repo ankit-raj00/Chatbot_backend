@@ -86,22 +86,19 @@ async def chat_endpoint(request: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/retrieve")
-async def retrieve_only(request: ChatRequest):
+async def retrieve_only(request: ChatRequest, current_user: dict = Depends(get_current_user)):
     """
     DEBUG ENDPOINT: Retrieve only.
     Bypasses Grader/Generator to show raw chunks found by vector search.
+    Auth-required and user-scoped — retrieval only returns the caller's own docs.
     """
     try:
-        logger.info(f"Retrieving chunks for: {request.message}")
-        inputs = {"question": request.message}
-        
-        # Manually run just the retrieval node logic
-        # (Or compile a sub-graph, but manual node call is easier since it's just a method)
-        # We access the retriever instance from the workflow object
+        user_id = str(current_user.get("_id"))
+        logger.info(f"Retrieving chunks for: {request.message} (user={user_id})")
+
         retriever_node = workflow.retriever
-        
-        # Need to construct a minimal state
-        state = {"question": request.message}
+        # user_id is the mandatory tenancy filter enforced inside retrieve()
+        state = {"question": request.message, "user_id": user_id}
         result_state = retriever_node.retrieve(state)
         
         documents = result_state.get("documents", [])

@@ -14,11 +14,11 @@ class ChatState(TypedDict):
         user_id: The ID of the current user (injected from API).
         conversation_id: The ID of the current conversation (MongoDB).
         enabled_tools: List of native tools enabled for this session.
-        mcp_server_urls: List of MCP servers to use.
+        mcp_server_ids: MongoDB _ids of the MCP servers selected for this request.
     """
     messages: Annotated[List[BaseMessage], add_messages]
     user_id: str
     conversation_id: Optional[str]
     enabled_tools: List[str]
-    mcp_server_urls: List[str]
+    mcp_server_ids: List[str]
     selected_files: Optional[List[str]]

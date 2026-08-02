@@ -28,6 +28,22 @@ MAX_MEMORIES = 10   # Maximum memories to retain per user
 # Collection reference
 user_memories_collection = db["user_memories"]
 
+# Module-level singleton embeddings client (Google) — reused across calls instead
+# of re-instantiating (and re-opening an HTTP client) on every memory retrieval.
+_embeddings = None
+
+
+def _get_embeddings():
+    global _embeddings
+    if _embeddings is None:
+        from langchain_google_genai import GoogleGenerativeAIEmbeddings
+        _embeddings = GoogleGenerativeAIEmbeddings(
+            model="models/gemini-embedding-001",
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+            output_dimensionality=768,
+        )
+    return _embeddings
+
 
 EXTRACTION_PROMPT = """You are a memory extraction assistant.
 Given a conversation snippet, extract 0-3 durable facts about the USER that are worth remembering long-term.
@@ -77,25 +93,22 @@ class MemoryService:
             return   # Too short to have extractable facts
 
         try:
-            from langchain_google_genai import ChatGoogleGenerativeAI
             import json
 
             from config.model_config import ModelConfig
-            
+            from graph.llm_registry import get_llm
+
             conversation_text = (
                 f"User: {human_message[:500]}\n"
                 f"Assistant: {ai_response[:500]}"
             )
 
-            llm = ChatGoogleGenerativeAI(
-                model=ModelConfig.MEMORY_EXTRACTION_MODEL,   # Now configurable via model_config.py
-                temperature=0,
-                google_api_key=os.getenv("GOOGLE_API_KEY"),
-            )
+            # Extraction runs through the same OmniRoute-backed registry as chat.
+            llm = get_llm(ModelConfig.MEMORY_EXTRACTION_MODEL)
 
             prompt = EXTRACTION_PROMPT.format(conversation_text=conversation_text)
             response = await llm.ainvoke(prompt)
-            raw = response.content.strip()
+            raw = (response.content if isinstance(response.content, str) else str(response.content)).strip()
 
             # Strip markdown fences if present
             if raw.startswith("```"):
@@ -148,9 +161,7 @@ class MemoryService:
             logger.info(f"Successfully saved memories to MongoDB for user {user_id}. Now holding {len(merged)} total memories.")
 
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            logger.warning(f"Memory extraction failed for {user_id} (non-fatal): {e}")
+            logger.warning("memory_extraction.failed", user_id=user_id, error=str(e), exc_info=True)
 
     @staticmethod
     async def get_relevant_memories(user_id: str, current_message: str, top_k: int = 5) -> list[dict]:
@@ -167,14 +178,7 @@ class MemoryService:
             return all_mems  # no point filtering small sets
 
         try:
-            from langchain_google_genai import GoogleGenerativeAIEmbeddings
-            import os
-
-            emb = GoogleGenerativeAIEmbeddings(
-                model="models/gemini-embedding-001",
-                google_api_key=os.getenv("GOOGLE_API_KEY"),
-                output_dimensionality=768,
-            )
+            emb = _get_embeddings()
             texts = [f"{m.get('topic', '')}: {m.get('content', '')}" for m in all_mems]
             q_emb, m_embs = await asyncio.gather(
                 emb.aembed_query(current_message[:500]),
@@ -183,6 +187,7 @@ class MemoryService:
             q = np.array(q_emb)
             scored = sorted(
                 zip([float(np.dot(q, np.array(me))) for me in m_embs], all_mems),
+                key=lambda pair: pair[0],   # sort by score only; dicts aren't comparable on ties
                 reverse=True,
             )
             return [m for _, m in scored[:top_k]]

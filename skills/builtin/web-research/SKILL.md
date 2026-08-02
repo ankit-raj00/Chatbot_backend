@@ -21,7 +21,7 @@ metadata:
 
 ## Workflow
 
-1. Perform a web search using `tavily_search` to find initial sources
+1. Perform a web search using the web search tool to find initial sources
 2. Identify the top 3-5 most relevant URLs from results
 3. Synthesize the raw data into a cohesive, structured summary
 
