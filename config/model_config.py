@@ -1,69 +1,54 @@
 """
-Model configuration for Gemini models
-Centralized place for all model-related settings
+Model configuration.
+
+Models are served through OmniRoute (an OpenAI-compatible gateway), so IDs use
+OmniRoute's `provider/model` naming (e.g. "antigravity/gemini-3.5-flash-medium").
+Add more entries here to expose them in the frontend model selector.
+
+Per-model USD pricing is optional; when unknown (default 0.0) the app reports a
+0 cost rather than a wrong one.
 """
 
 from typing import Dict, List, Any
 
 class ModelConfig:
-    """Configuration for available Gemini models"""
-    
-    # Available models with their capabilities
-    MODELS: Dict[str, Dict[str, Any]] = {
-        "gemini-2.5-flash-lite": {
-            "name": "Gemini 2.5 Flash Lite",
-            "description": "Fastest, highest quota — primary model for all features",
-            "supports_images": True,
-            "supports_video": True,
-            "supports_audio": True,
-            "max_tokens": 8192,
-            "context_window": 1000000,
-        },
-        "gemini-2.5-pro": {
-            "name": "Gemini 2.5 Pro",
-            "description": "Most capable model, best for complex tasks",
-            "supports_images": True,
-            "supports_video": True,
-            "supports_audio": True,
-            "max_tokens": 8192,
-            "context_window": 1000000,
-        },
-        "gemini-2.5-flash": {
-            "name": "Gemini 2.5 Flash",
-            "description": "Fast and efficient, good for most tasks",
-            "supports_images": True,
-            "supports_video": True,
-            "supports_audio": True,
-            "max_tokens": 8192,
-            "context_window": 1000000,
-        },
+    """Configuration for available models (served via OmniRoute)."""
 
-        "gemini-3.1-flash-lite": {
-            "name": "Gemini 3.1 Flash Lite",
-            "description": "Latest fast model",
+    # Available models with their capabilities.
+    # `price_in`/`price_out` are USD per 1M tokens (0 => unknown/not billed).
+    MODELS: Dict[str, Dict[str, Any]] = {
+        "antigravity/gemini-3.5-flash-medium": {
+            "name": "Gemini 3.5 Flash (Medium)",
+            "description": "Default model via OmniRoute — fast, multimodal, tool-capable",
             "supports_images": True,
             "supports_video": True,
             "supports_audio": True,
             "max_tokens": 8192,
             "context_window": 1000000,
-        },
-        "gemini-flash-latest": {
-            "name": "Gemini Flash (Latest)",
-            "description": "Latest flash model with newest features",
-            "supports_images": True,
-            "supports_video": True,
-            "supports_audio": True,
-            "max_tokens": 8192,
-            "context_window": 1000000,
+            "price_in": 0.0,
+            "price_out": 0.0,
         },
     }
 
-    # Default model — highest quota, lowest latency
-    DEFAULT_MODEL = "gemini-3.1-flash-lite"
-    
+    # Default model — served via OmniRoute
+    DEFAULT_MODEL = "antigravity/gemini-3.5-flash-medium"
+
     # Model used by MemoryService to extract durable facts silently in the background
-    MEMORY_EXTRACTION_MODEL = "gemini-3.1-flash-lite"
-    
+    MEMORY_EXTRACTION_MODEL = "antigravity/gemini-3.5-flash-medium"
+
+    # Model used by the analyze_image vision tool (must support image input)
+    VISION_MODEL = "antigravity/gemini-3.5-flash-medium"
+
+    @classmethod
+    def get_pricing(cls, model_id: str) -> Dict[str, float]:
+        """Return {'input': usd_per_token, 'output': usd_per_token} for a model.
+        Defaults to 0.0 when the model or its pricing is unknown."""
+        info = cls.MODELS.get(model_id, {})
+        return {
+            "input":  float(info.get("price_in", 0.0)) / 1_000_000,
+            "output": float(info.get("price_out", 0.0)) / 1_000_000,
+        }
+
     @classmethod
     def get_model_info(cls, model_id: str) -> Dict[str, Any]:
         """Get information about a specific model"""

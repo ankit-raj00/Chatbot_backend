@@ -1,38 +1,37 @@
 """
-End-to-End System Test Suite — AgentX v2
+End-to-End System Test Suite — AgentX v3
 =========================================
-Covers the ENTIRE pipeline from HTTP layer → supervisor → subgraphs → tools → skills → RAG.
+Covers the pipeline from HTTP layer → single ReAct agent (graph/builder.py) →
+tools → skills → RAG. The pre-v3 supervisor/per-intent-subgraph architecture has
+been fully removed; agent-graph-level coverage for the current architecture
+lives in tests/test_agent_v3.py.
 
 Test groups:
   E1  - App startup & health checks
   E2  - Authentication (signup → login → protected route → logout)
-  E3  - Supervisor intent routing (all 7 agents)
   E4  - Skill system (builtin list, validate, upload, list vault, delete)
   E5  - Universal file reader (all supported formats)
   E6  - RAG pipeline (embedding grader, query rewriter, memory service)
   E7  - Circuit breaker & tool cache
-  E8  - Shell subgraph sandbox safety
-  E9  - Chat subgraph skill injection
+  E8  - run_shell sandbox safety
   E10 - Output & agent routes (auth-protected endpoints)
   E11 - Conversation routes
   E12 - Import integrity (all modules must import cleanly)
-  E13 - Workspace cleanup utility
-  E14 - Full chat streaming pipeline (mocked LLM)
+  E13 - Workspace cleanup utility (idle-gated policy)
+  E14 - Misc pipeline checks (file reader, RAG grader fallback, skill vault HTTP)
 
 Run with:
     pytest tests/test_e2e.py -v --tb=short
 """
 
-import sys, os, csv, json, tempfile, asyncio
+import sys, os, csv, json, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from pathlib import Path
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.documents import Document
 from fastapi.testclient import TestClient
-from httpx import AsyncClient, ASGITransport
 
 # ══════════════════════════════════════════════════════════════
 # Fixtures
@@ -61,23 +60,6 @@ description: Missing name field
 ---
 Short body.
 """
-
-LLM_PATCH  = "graph.llm_registry.get_llm"
-MCP_PATCH  = "utils.mcp_connection_manager.mcp_manager"
-SKILL_PATCH = "skills.skill_loader.get_relevant_skill_for_message"
-
-
-def _base_supervisor_state(**overrides):
-    s = {
-        "messages": [HumanMessage(content="Hello")],
-        "user_id": "e2e_user", "conversation_id": "e2e_conv",
-        "agent": "", "model": "gemini-2.5-flash",
-        "enabled_tools": [], "selected_files": None,
-        "skill_body": "", "final_response": "",
-    }
-    s.update(overrides)
-    return s
-
 
 # ══════════════════════════════════════════════════════════════
 # E1 — App Startup & Health
@@ -184,110 +166,6 @@ class TestE2Auth:
 
 
 # ══════════════════════════════════════════════════════════════
-# E3 — Supervisor Intent Routing
-# ══════════════════════════════════════════════════════════════
-
-class TestE3SupervisorRouting:
-    """E3: All 7 intent routes must work with mocked LLM."""
-
-    @pytest.mark.asyncio
-    async def _route(self, msg: str, expected_agent: str):
-        from graph.supervisor import intent_classifier_node, VALID_AGENTS
-        assert expected_agent in VALID_AGENTS
-        state = _base_supervisor_state(messages=[HumanMessage(content=msg)])
-        mock_resp = MagicMock()
-        mock_resp.content = expected_agent
-        with patch(LLM_PATCH) as mock_llm_fn, \
-             patch(SKILL_PATCH, new_callable=AsyncMock, return_value=None):
-            mock_llm = AsyncMock()
-            mock_llm.ainvoke = AsyncMock(return_value=mock_resp)
-            mock_llm_fn.return_value = mock_llm
-            result = await intent_classifier_node(state)
-        assert result["agent"] == expected_agent
-        return result
-
-    @pytest.mark.asyncio
-    async def test_e3_01_chat_route(self):
-        await self._route("What is machine learning?", "chat")
-
-    @pytest.mark.asyncio
-    async def test_e3_02_shell_route(self):
-        await self._route("Run my python script", "shell")
-
-    @pytest.mark.asyncio
-    async def test_e3_03_document_route(self):
-        await self._route("Create a PDF report on sales", "document")
-
-    @pytest.mark.asyncio
-    async def test_e3_04_vision_route(self):
-        await self._route("What does this image show?", "vision")
-
-    @pytest.mark.asyncio
-    async def test_e3_05_code_route(self):
-        await self._route("Write a FastAPI endpoint", "code")
-
-    @pytest.mark.asyncio
-    async def test_e3_06_rag_route(self):
-        await self._route("Search my knowledge base", "rag")
-
-    @pytest.mark.asyncio
-    async def test_e3_07_data_route(self):
-        await self._route("Analyze this CSV for trends", "data")
-
-    @pytest.mark.asyncio
-    async def test_e3_08_invalid_agent_falls_back_to_chat(self):
-        """Invalid agent name from LLM falls back to 'chat'."""
-        from graph.supervisor import intent_classifier_node
-        state = _base_supervisor_state()
-        mock_resp = MagicMock(content="totally_unknown_agent")
-        with patch(LLM_PATCH) as mf, \
-             patch(SKILL_PATCH, new_callable=AsyncMock, return_value=None):
-            ml = AsyncMock()
-            ml.ainvoke = AsyncMock(return_value=mock_resp)
-            mf.return_value = ml
-            r = await intent_classifier_node(state)
-        assert r["agent"] == "chat"
-
-    @pytest.mark.asyncio
-    async def test_e3_09_llm_failure_falls_back_to_chat(self):
-        """LLM API failure falls back to 'chat' gracefully."""
-        from graph.supervisor import intent_classifier_node
-        state = _base_supervisor_state()
-        with patch(LLM_PATCH) as mf, \
-             patch(SKILL_PATCH, new_callable=AsyncMock, return_value=None):
-            ml = AsyncMock()
-            ml.ainvoke = AsyncMock(side_effect=RuntimeError("API down"))
-            mf.return_value = ml
-            r = await intent_classifier_node(state)
-        assert r["agent"] == "chat"
-
-    @pytest.mark.asyncio
-    async def test_e3_10_empty_messages_defaults_to_chat(self):
-        from graph.supervisor import intent_classifier_node
-        state = _base_supervisor_state(messages=[])
-        r = await intent_classifier_node(state)
-        assert r["agent"] == "chat"
-
-    @pytest.mark.asyncio
-    async def test_e3_11_skill_injected_when_matched(self):
-        """When skill_loader finds a match, skill_body must be set."""
-        from graph.supervisor import intent_classifier_node
-        state = _base_supervisor_state(messages=[HumanMessage(content="Create a PDF")])
-        mock_resp = MagicMock(content="document")
-        with patch(LLM_PATCH) as mf, \
-             patch(SKILL_PATCH, new_callable=AsyncMock, return_value="## PDF Skill\nDo this."):
-            ml = AsyncMock()
-            ml.ainvoke = AsyncMock(return_value=mock_resp)
-            mf.return_value = ml
-            r = await intent_classifier_node(state)
-        assert r["skill_body"] == "## PDF Skill\nDo this."
-
-    def test_e3_12_valid_agents_set_complete(self):
-        from graph.supervisor import VALID_AGENTS
-        assert VALID_AGENTS == {"chat", "shell", "document", "vision", "code", "rag", "data"}
-
-
-# ══════════════════════════════════════════════════════════════
 # E4 — Skill System
 # ══════════════════════════════════════════════════════════════
 
@@ -331,8 +209,8 @@ class TestE4SkillSystem:
     async def test_e4_06_get_relevant_skill_pdf_match(self):
         from skills.skill_loader import get_relevant_skill_for_message
         result = await get_relevant_skill_for_message("create a PDF report", "u1", "document")
-        # Should find the create-pdf skill or return None — just must not crash
-        assert result is None or isinstance(result, str)
+        # Returns (body, name) tuple on match, or None — just must not crash.
+        assert result is None or isinstance(result, tuple)
 
     @pytest.mark.asyncio
     async def test_e4_07_get_relevant_skill_agent_filter(self):
@@ -681,134 +559,78 @@ class TestE7CircuitBreakerAndCache:
 
 
 # ══════════════════════════════════════════════════════════════
-# E8 — Shell Subgraph Sandbox
+# E8 — run_shell Sandbox
 # ══════════════════════════════════════════════════════════════
 
 class TestE8ShellSandbox:
-    """E8: Shell subgraph safety — blocked commands + safe execution."""
+    """E8: run_shell sandbox safety — blocked commands + safe execution.
+
+    Targets the current tools directly: tools.utilities.run_shell.BLOCKED_PATTERNS
+    for pattern matching, and utils.code_executor.run_shell for execution — the
+    graph/subgraphs/shell_subgraph.py compat shim these used to go through has
+    been removed along with the rest of the pre-v3 subgraph architecture.
+    """
+
+    @staticmethod
+    def _is_blocked(cmd: str) -> bool:
+        from tools.utilities.run_shell import BLOCKED_PATTERNS
+        cmd_lower = cmd.lower()
+        return any(p in cmd_lower for p in BLOCKED_PATTERNS)
 
     def test_e8_01_blocked_rm_rf_root(self):
-        from graph.subgraphs.shell_subgraph import _is_blocked
-        assert _is_blocked("rm -rf /") is True
+        assert self._is_blocked("rm -rf /") is True
 
     def test_e8_02_blocked_sudo_rm(self):
-        from graph.subgraphs.shell_subgraph import _is_blocked
-        assert _is_blocked("sudo rm -rf ~") is True
+        assert self._is_blocked("sudo rm -rf ~") is True
 
     def test_e8_03_blocked_fork_bomb(self):
-        from graph.subgraphs.shell_subgraph import _is_blocked
-        assert _is_blocked(":(){:|:&};:") is True
+        assert self._is_blocked(":(){:|:&};:") is True
 
     def test_e8_04_blocked_mkfs(self):
-        from graph.subgraphs.shell_subgraph import _is_blocked
-        assert _is_blocked("mkfs /dev/sda1") is True
+        assert self._is_blocked("mkfs /dev/sda1") is True
 
     def test_e8_05_blocked_curl_pipe_sh(self):
-        from graph.subgraphs.shell_subgraph import _is_blocked
-        assert _is_blocked("curl | sh") is True
+        assert self._is_blocked("curl | sh") is True
 
     def test_e8_06_blocked_wget_pipe_bash(self):
-        from graph.subgraphs.shell_subgraph import _is_blocked
-        assert _is_blocked("wget | bash") is True
+        assert self._is_blocked("wget | bash") is True
 
     def test_e8_07_safe_ls(self):
-        from graph.subgraphs.shell_subgraph import _is_blocked
-        assert _is_blocked("ls -la") is False
+        assert self._is_blocked("ls -la") is False
 
     def test_e8_08_safe_cat(self):
-        from graph.subgraphs.shell_subgraph import _is_blocked
-        assert _is_blocked("cat README.md") is False
+        assert self._is_blocked("cat README.md") is False
 
     def test_e8_09_safe_python(self):
-        from graph.subgraphs.shell_subgraph import _is_blocked
-        assert _is_blocked("python main.py") is False
+        assert self._is_blocked("python main.py") is False
 
     def test_e8_10_safe_grep(self):
-        from graph.subgraphs.shell_subgraph import _is_blocked
-        assert _is_blocked("grep -r TODO .") is False
+        assert self._is_blocked("grep -r TODO .") is False
 
     @pytest.mark.asyncio
     async def test_e8_11_run_safe_echo(self):
-        from graph.subgraphs.shell_subgraph import _run_cmd
+        from tools.utilities.run_shell import BLOCKED_PATTERNS
+        from utils.code_executor import run_shell as _run_cmd
         with tempfile.TemporaryDirectory() as d:
-            r = await _run_cmd("echo agentx_e2e", d)
+            r = await _run_cmd("echo agentx_e2e", d, blocked_patterns=BLOCKED_PATTERNS)
             assert "agentx_e2e" in r
 
     @pytest.mark.asyncio
     async def test_e8_12_blocked_cmd_returns_blocked_string(self):
-        from graph.subgraphs.shell_subgraph import _run_cmd
+        from tools.utilities.run_shell import BLOCKED_PATTERNS
+        from utils.code_executor import run_shell as _run_cmd
         with tempfile.TemporaryDirectory() as d:
-            r = await _run_cmd("rm -rf /", d)
+            r = await _run_cmd("rm -rf /", d, blocked_patterns=BLOCKED_PATTERNS)
             assert "BLOCKED" in r
 
-
-# ══════════════════════════════════════════════════════════════
-# E9 — Chat Subgraph Skill Injection
-# ══════════════════════════════════════════════════════════════
-
-class TestE9ChatSubgraphSkillInjection:
-    """E9: Chat subgraph correctly injects skills into the message list."""
-
     @pytest.mark.asyncio
-    async def test_e9_01_basic_response(self):
-        from graph.subgraphs.chat_subgraph import chat_subgraph
-        mock_ai = AIMessage(content="Hello!")
-        with patch(LLM_PATCH) as mf, patch(MCP_PATCH) as mcp:
-            mcp.get_all_langchain_tools = AsyncMock(return_value=[])
-            ml = MagicMock()
-            ml.ainvoke = AsyncMock(return_value=mock_ai)
-            ml.bind_tools = MagicMock(return_value=ml)
-            mf.return_value = ml
-            r = await chat_subgraph(_base_supervisor_state(), {})
-        assert r["final_response"] == "Hello!"
-
-    @pytest.mark.asyncio
-    async def test_e9_02_skill_prepended_as_system_message(self):
-        from graph.subgraphs.chat_subgraph import chat_subgraph
-        with patch(LLM_PATCH) as mf, patch(MCP_PATCH) as mcp:
-            mcp.get_all_langchain_tools = AsyncMock(return_value=[])
-            ml = MagicMock()
-            ml.ainvoke = AsyncMock(return_value=AIMessage(content="OK"))
-            ml.bind_tools = MagicMock(return_value=ml)
-            mf.return_value = ml
-            state = _base_supervisor_state(skill_body="## PDF Skill\nDo this.")
-            await chat_subgraph(state, {})
-        msgs = ml.ainvoke.call_args[0][0]
-        assert isinstance(msgs[0], SystemMessage)
-        assert "PDF Skill" in msgs[0].content
-
-    @pytest.mark.asyncio
-    async def test_e9_03_existing_system_message_gets_skill_appended(self):
-        from graph.subgraphs.chat_subgraph import chat_subgraph
-        with patch(LLM_PATCH) as mf, patch(MCP_PATCH) as mcp:
-            mcp.get_all_langchain_tools = AsyncMock(return_value=[])
-            ml = MagicMock()
-            ml.ainvoke = AsyncMock(return_value=AIMessage(content="OK"))
-            ml.bind_tools = MagicMock(return_value=ml)
-            mf.return_value = ml
-            state = _base_supervisor_state(
-                messages=[SystemMessage(content="You are helpful."),
-                          HumanMessage(content="Help!")],
-                skill_body="## ACTIVE SKILL\nDo this.",
-            )
-            await chat_subgraph(state, {})
-        msgs = ml.ainvoke.call_args[0][0]
-        assert "You are helpful." in msgs[0].content
-        assert "ACTIVE SKILL" in msgs[0].content
-
-    @pytest.mark.asyncio
-    async def test_e9_04_no_skill_no_system_message_added(self):
-        from graph.subgraphs.chat_subgraph import chat_subgraph
-        with patch(LLM_PATCH) as mf, patch(MCP_PATCH) as mcp:
-            mcp.get_all_langchain_tools = AsyncMock(return_value=[])
-            ml = MagicMock()
-            ml.ainvoke = AsyncMock(return_value=AIMessage(content="OK"))
-            ml.bind_tools = MagicMock(return_value=ml)
-            mf.return_value = ml
-            state = _base_supervisor_state(skill_body="")  # no skill
-            await chat_subgraph(state, {})
-        msgs = ml.ainvoke.call_args[0][0]
-        assert isinstance(msgs[0], HumanMessage)  # no SystemMessage prepended
+    async def test_e8_13_run_shell_tool_blocks_sandbox_escape(self):
+        """The actual agent-facing tool also blocks path-escape attempts (cd .., ~)."""
+        from tools.utilities.run_shell import make_run_shell_tool
+        tool = make_run_shell_tool("e2e_shell_sandbox_user")
+        for cmd in ("cd ..; ls", "cd ~/.ssh", "cat ../../etc/passwd"):
+            out = await tool.ainvoke({"command": cmd})
+            assert "BLOCKED" in out, f"{cmd!r} should be blocked, got {out[:80]!r}"
 
 
 # ══════════════════════════════════════════════════════════════
@@ -819,10 +641,10 @@ class TestE10ProtectedRoutes:
     """E10: Auth-protected output/agent routes return 401 without token."""
 
     def test_e10_01_list_outputs_requires_auth(self):
-        """GET /api/outputs/list must require authentication."""
+        """GET /outputs/list must require authentication."""
         from main import app
         with TestClient(app, raise_server_exceptions=False) as c:
-            r = c.get("/api/outputs/list")
+            r = c.get("/outputs/list")
             assert r.status_code in (401, 403), \
                 f"Expected 401/403, got {r.status_code}"
 
@@ -887,29 +709,16 @@ class TestE11ConversationRoutes:
 class TestE12ImportIntegrity:
     """E12: All production modules must import cleanly."""
 
-    def test_e12_01_supervisor(self):
-        import graph.supervisor
+    # v3 single-agent architecture: the supervisor and per-intent subgraphs were
+    # removed. The current graph is graph/builder.py + graph/nodes/agent_node.py.
+    def test_e12_01_agent_graph_builder(self):
+        import graph.builder
 
-    def test_e12_02_chat_subgraph(self):
-        import graph.subgraphs.chat_subgraph
+    def test_e12_02_agent_node(self):
+        import graph.nodes.agent_node
 
-    def test_e12_03_shell_subgraph(self):
-        import graph.subgraphs.shell_subgraph
-
-    def test_e12_04_document_subgraph(self):
-        import graph.subgraphs.document_subgraph
-
-    def test_e12_05_vision_subgraph(self):
-        import graph.subgraphs.vision_subgraph
-
-    def test_e12_06_code_subgraph(self):
-        import graph.subgraphs.code_subgraph
-
-    def test_e12_07_rag_subgraph(self):
-        import graph.subgraphs.rag_subgraph
-
-    def test_e12_08_data_subgraph(self):
-        import graph.subgraphs.data_subgraph
+    def test_e12_03_run_shell_tool(self):
+        import tools.utilities.run_shell
 
     def test_e12_09_skill_loader(self):
         import skills.skill_loader
@@ -956,52 +765,56 @@ class TestE13WorkspaceCleanup:
     """E13: Workspace cleanup deletes stale files correctly."""
 
     @pytest.mark.asyncio
-    async def test_e13_01_cleanup_deletes_old_files(self):
-        import time
+    async def test_e13_01_cleanup_deletes_old_files_when_idle(self):
+        """A stale file in an IDLE workspace's policy dir is deleted; a fresh one is kept."""
+        import time, json
         import utils.workspace_cleanup as wc_mod
 
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
+            outputs = root_path / "user_1" / "outputs"
+            outputs.mkdir(parents=True)
 
-            # Create an "old" file (simulate age via mtime)
-            old_file = root_path / "old_output.pdf"
-            old_file.write_text("old content")
-            old_mtime = time.time() - (25 * 3600)   # 25 hours old
+            old_file = outputs / "old_output.pdf"
+            old_file.write_text("old")
+            old_mtime = time.time() - (200 * 3600)   # older than the 168h outputs TTL
             os.utime(old_file, (old_mtime, old_mtime))
 
-            # Create a "new" file
-            new_file = root_path / "new_output.pdf"
-            new_file.write_text("new content")
+            new_file = outputs / "new_output.pdf"
+            new_file.write_text("new")
 
-            # Patch the module constants so _cleanup() uses our temp dir
-            with patch.object(wc_mod, "WORKSPACE_ROOT", root_path), \
-                 patch.object(wc_mod, "MAX_AGE_HOURS", 24):
+            # No .meta/last_active => treated as fully idle, so "files" cleanup runs.
+            with patch.object(wc_mod, "WORKSPACE_ROOT", root_path):
                 await wc_mod._cleanup()
 
-            assert not old_file.exists(), "Old file should have been deleted"
-            assert new_file.exists(),     "New file should still exist"
+            assert not old_file.exists(), "Stale file in idle workspace should be deleted"
+            assert new_file.exists(),     "Recent file should still exist"
 
     @pytest.mark.asyncio
-    async def test_e13_02_cleanup_preserves_directories(self):
-        """Directories themselves should not be deleted, only files inside."""
-        import time
+    async def test_e13_02_cleanup_skips_active_workspace(self):
+        """An ACTIVE workspace (recent last_active) keeps its files even if old."""
+        import time, json
         import utils.workspace_cleanup as wc_mod
 
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
-            subdir = root_path / "user_123"
-            subdir.mkdir()
-            old_file = subdir / "old.txt"
+            user_dir = root_path / "user_2"
+            outputs = user_dir / "outputs"
+            outputs.mkdir(parents=True)
+            meta = user_dir / ".meta"
+            meta.mkdir()
+            (meta / "last_active.json").write_text(json.dumps({"timestamp": time.time()}))
+
+            old_file = outputs / "old.pdf"
             old_file.write_text("x")
-            old_mtime = time.time() - (48 * 3600)
+            old_mtime = time.time() - (300 * 3600)
             os.utime(old_file, (old_mtime, old_mtime))
 
-            with patch.object(wc_mod, "WORKSPACE_ROOT", root_path), \
-                 patch.object(wc_mod, "MAX_AGE_HOURS", 24):
+            with patch.object(wc_mod, "WORKSPACE_ROOT", root_path):
                 await wc_mod._cleanup()
 
-            assert subdir.exists(),       "Subdirectory itself should survive"
-            assert not old_file.exists(), "Stale file inside subdir should be deleted"
+            assert outputs.exists(),   "Directory itself should survive"
+            assert old_file.exists(),  "Active workspace files must be preserved (idle-gated)"
 
     @pytest.mark.asyncio
     async def test_e13_03_cleanup_does_nothing_when_workspace_missing(self):
@@ -1013,72 +826,16 @@ class TestE13WorkspaceCleanup:
 
 
 # ══════════════════════════════════════════════════════════════
-# E14 — Full Chat Pipeline (mocked)
+# E14 — Misc Pipeline Checks (file reader, RAG grader, skill vault HTTP)
 # ══════════════════════════════════════════════════════════════
+# Originally exercised the pre-v3 supervisor pipeline end-to-end; those cases
+# were removed with the supervisor. What remains here still targets current,
+# non-legacy modules. End-to-end chat itself is covered live by
+# tests/test_agent_v3.py (component-level) and the scratchpad e2e harness
+# (full HTTP + SSE run against the running server).
 
-class TestE14FullChatPipeline:
-    """E14: End-to-end chat pipeline with mocked LLM and DB."""
-
-    @pytest.mark.asyncio
-    async def test_e14_01_supervisor_routes_and_subgraph_responds(self):
-        """Full flow: supervisor classifies → chat subgraph responds."""
-        from graph.supervisor import intent_classifier_node
-        from graph.subgraphs.chat_subgraph import chat_subgraph
-
-        state = _base_supervisor_state(
-            messages=[HumanMessage(content="Tell me a joke")]
-        )
-
-        # Step 1: Intent classification
-        mock_resp = MagicMock(content="chat")
-        with patch(LLM_PATCH) as mf, \
-             patch(SKILL_PATCH, new_callable=AsyncMock, return_value=None):
-            ml = AsyncMock()
-            ml.ainvoke = AsyncMock(return_value=mock_resp)
-            mf.return_value = ml
-            classified = await intent_classifier_node(state)
-
-        assert classified["agent"] == "chat"
-        state.update(classified)
-
-        # Step 2: Chat subgraph runs
-        mock_ai = AIMessage(content="Why did the AI cross the road?")
-        with patch(LLM_PATCH) as mf2, patch(MCP_PATCH) as mcp:
-            mcp.get_all_langchain_tools = AsyncMock(return_value=[])
-            ml2 = MagicMock()
-            ml2.ainvoke = AsyncMock(return_value=mock_ai)
-            ml2.bind_tools = MagicMock(return_value=ml2)
-            mf2.return_value = ml2
-            chat_result = await chat_subgraph(state, {})
-
-        assert "road" in chat_result["final_response"]
-        assert len(chat_result["messages"]) == 1
-
-    @pytest.mark.asyncio
-    async def test_e14_02_document_intent_routes_correctly(self):
-        """PDF request → document agent → document subgraph mocked response."""
-        from graph.supervisor import intent_classifier_node
-        state = _base_supervisor_state(
-            messages=[HumanMessage(content="Create a PDF report on quarterly sales")]
-        )
-        mock_resp = MagicMock(content="document")
-        with patch(LLM_PATCH) as mf, \
-             patch(SKILL_PATCH, new_callable=AsyncMock, return_value="## PDF Skill\nUse reportlab."):
-            ml = AsyncMock()
-            ml.ainvoke = AsyncMock(return_value=mock_resp)
-            mf.return_value = ml
-            r = await intent_classifier_node(state)
-        assert r["agent"] == "document"
-        assert "PDF Skill" in r["skill_body"]
-
-    @pytest.mark.asyncio
-    async def test_e14_03_shell_dangerous_command_blocked(self):
-        """Shell agent must never execute dangerous commands."""
-        from graph.subgraphs.shell_subgraph import _run_cmd
-        with tempfile.TemporaryDirectory() as d:
-            for dangerous in ["rm -rf /", "sudo rm -rf ~", "mkfs /dev/sda"]:
-                r = await _run_cmd(dangerous, d)
-                assert "BLOCKED" in r, f"Expected BLOCKED for: {dangerous}"
+class TestE14MiscPipelineChecks:
+    """E14: File reader, RAG embedding grader fallback, and skill vault HTTP checks."""
 
     @pytest.mark.asyncio
     async def test_e14_04_file_upload_pipeline_csv(self):
@@ -1128,9 +885,3 @@ class TestE14FullChatPipeline:
             assert r.status_code == 200
             skills = r.json()["skills"]
             assert len(skills) > 0
-
-    def test_e14_08_all_7_valid_agents_present(self):
-        """All 7 agent types must be present in VALID_AGENTS."""
-        from graph.supervisor import VALID_AGENTS
-        for agent in ["chat", "shell", "document", "vision", "code", "rag", "data"]:
-            assert agent in VALID_AGENTS

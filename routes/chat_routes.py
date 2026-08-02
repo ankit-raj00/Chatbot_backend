@@ -4,6 +4,7 @@ from typing import List, Optional
 from controllers.chat_controller import ChatController
 from core.middleware import get_current_user
 from core.limiter import limiter
+from config.model_config import ModelConfig
 import os
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
@@ -14,8 +15,8 @@ chat_controller = ChatController()
 class ChatRequest(BaseModel):
     message: str
     conversation_id: str | None = None
-    mcp_server_urls: List[str] = []
-    model: str = "gemini-3.1-flash-lite"
+    mcp_server_ids: List[str] = []
+    model: str = ModelConfig.DEFAULT_MODEL
     enabled_tools: List[str] = []
     selected_files: List[str] = []
 
@@ -35,7 +36,7 @@ async def chat_stream(
             user_id=str(current_user["_id"]),
             message=chat_request.message,
             conversation_id=chat_request.conversation_id,
-            mcp_server_urls=chat_request.mcp_server_urls,
+            mcp_server_ids=chat_request.mcp_server_ids,
             model=chat_request.model,
             enabled_tools=chat_request.enabled_tools,
             selected_files=chat_request.selected_files
@@ -47,8 +48,8 @@ async def chat_stream(
 async def chat_stream_multimodal(
     message: str = Form(...),
     conversation_id: str = Form(None),
-    mcp_server_urls: str = Form(None), # JSON string
-    model: str = Form("gemini-3.1-flash-lite"),
+    mcp_server_ids: str = Form(None), # JSON string
+    model: str = Form(ModelConfig.DEFAULT_MODEL),
     images: List[UploadFile] = File(None),
     enabled_tools: str = Form(None), # JSON string
     selected_files: str = Form(None), # JSON string
@@ -57,18 +58,18 @@ async def chat_stream_multimodal(
     """Process chat message with images/files + MCP (Streaming)"""
     from fastapi.responses import StreamingResponse
     import json
-    
+
     # Parse JSON fields
-    mcp_urls_list = json.loads(mcp_server_urls) if mcp_server_urls else None
+    mcp_ids_list = json.loads(mcp_server_ids) if mcp_server_ids else None
     enabled_tools_list = json.loads(enabled_tools) if enabled_tools else None
     selected_files_list = json.loads(selected_files) if selected_files else None
-    
+
     return StreamingResponse(
         chat_controller.process_chat_stream(
             user_id=str(current_user["_id"]),
             message=message,
             conversation_id=conversation_id,
-            mcp_server_urls=mcp_urls_list,
+            mcp_server_ids=mcp_ids_list,
             model=model,
             files=images,
             enabled_tools=enabled_tools_list,

@@ -70,8 +70,8 @@ class PromptBuilder:
     @staticmethod
     def build_memory_section(memories: list[dict]) -> str:
         """
-        Build the memory section injected into the system prompt.
-        Phase 8 populates this. Returns empty string until Phase 8 is implemented.
+        Build the "What I know about you" section injected into the system prompt
+        from the user's stored long-term memories. Returns "" when there are none.
         """
         if not memories:
             return ""

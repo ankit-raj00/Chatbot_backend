@@ -3,14 +3,24 @@ import logging
 import pathlib
 from qdrant_client import QdrantClient, models
 try:
-    from langchain_qdrant import QdrantVectorStore
+    from langchain_qdrant import QdrantVectorStore, RetrievalMode, FastEmbedSparse
+    _HYBRID_AVAILABLE = True
 except ImportError:
     from langchain_community.vectorstores import Qdrant as QdrantVectorStore
+    RetrievalMode = FastEmbedSparse = None
+    _HYBRID_AVAILABLE = False
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 logging.basicConfig(level=logging.INFO)
 import structlog
 logger = structlog.get_logger(__name__)
+
+# Hybrid (dense + BM25 sparse, RRF-fused) retrieval. Needs a collection with
+# named "dense" + "sparse" vectors; dense-only collections use the legacy path.
+HYBRID_RETRIEVAL = os.getenv("HYBRID_RETRIEVAL", "true").lower() == "true" and _HYBRID_AVAILABLE
+DENSE_VECTOR_NAME = "dense"
+SPARSE_VECTOR_NAME = "sparse"
+SPARSE_MODEL = os.getenv("SPARSE_MODEL", "Qdrant/bm25")
 
 class QdrantManager:
     """
@@ -40,8 +50,18 @@ class QdrantManager:
             model="models/gemini-embedding-001",
             google_api_key=os.getenv("GOOGLE_API_KEY"),
             output_dimensionality=768,  # MRL truncation keeps dim=768, matching Qdrant collection
-            max_retries=6,              # Built-in SDK retry for 429 RESOURCE_EXHAUSTED
+            max_retries=2,              # small internal buffer; batch-level retry-with-backoff
+                                        # (IngestionService._add_documents_with_retry) is the authority
         )
+        # BM25 sparse embedder (FastEmbed / ONNX, CPU, no API) — keyword signal
+        # fused with the dense vector via RRF at query time.
+        self.sparse_embedding = None
+        if HYBRID_RETRIEVAL:
+            try:
+                self.sparse_embedding = FastEmbedSparse(model_name=SPARSE_MODEL)
+            except Exception as e:
+                logger.warning(f"Sparse embedder unavailable, falling back to dense-only: {e}")
+        self.hybrid = HYBRID_RETRIEVAL and self.sparse_embedding is not None
 
         # --- Connection Strategy ---
         if self.api_key:
@@ -102,15 +122,33 @@ class QdrantManager:
             collections = self.client.get_collections()
             exists = any(c.name == self.collection_name for c in collections.collections)
 
-            if not exists:
-                logger.info(f"Creating collection '{self.collection_name}' (dim=768, cosine)")
-                self.client.create_collection(
-                    collection_name=self.collection_name,
-                    vectors_config=models.VectorParams(
-                        size=768,
-                        distance=models.Distance.COSINE
-                    )
+            # A hybrid collection needs a NAMED "dense" vector + a sparse vector.
+            # A pre-existing dense-only (unnamed vector) collection is incompatible,
+            # so recreate it when hybrid is enabled (re-index required afterwards).
+            if exists and self.hybrid and not self._is_hybrid_collection():
+                logger.warning(
+                    f"Collection '{self.collection_name}' is dense-only but hybrid is "
+                    f"enabled — recreating with named dense+sparse vectors (re-index needed)."
                 )
+                self.client.delete_collection(self.collection_name)
+                exists = False
+
+            if not exists:
+                if self.hybrid:
+                    logger.info(f"Creating HYBRID collection '{self.collection_name}' (dense 768 + bm25 sparse)")
+                    self.client.create_collection(
+                        collection_name=self.collection_name,
+                        vectors_config={DENSE_VECTOR_NAME: models.VectorParams(
+                            size=768, distance=models.Distance.COSINE)},
+                        sparse_vectors_config={SPARSE_VECTOR_NAME: models.SparseVectorParams(
+                            modifier=models.Modifier.IDF)},  # IDF for BM25 scoring
+                    )
+                else:
+                    logger.info(f"Creating collection '{self.collection_name}' (dim=768, cosine)")
+                    self.client.create_collection(
+                        collection_name=self.collection_name,
+                        vectors_config=models.VectorParams(size=768, distance=models.Distance.COSINE),
+                    )
                 logger.info(f"Collection '{self.collection_name}' created.")
             else:
                 logger.info(f"Collection '{self.collection_name}' already exists.")
@@ -227,9 +265,32 @@ class QdrantManager:
             logger.error(f"Failed to delete file {file_id}: {e}")
             return False
 
+    def _is_hybrid_collection(self) -> bool:
+        """True if the existing collection has a named 'dense' vector (hybrid layout)."""
+        try:
+            info = self.client.get_collection(self.collection_name)
+            vectors = info.config.params.vectors
+            return isinstance(vectors, dict) and DENSE_VECTOR_NAME in vectors
+        except Exception:
+            return False
+
     def get_vector_store(self) -> QdrantVectorStore:
-        """Returns the LangChain QdrantVectorStore wrapper."""
+        """
+        LangChain QdrantVectorStore wrapper. In hybrid mode it fuses the dense
+        (Gemini) and sparse (BM25) vectors with RRF at query time; otherwise it
+        falls back to dense-only similarity search.
+        """
         self.ensure_collection()
+        if self.hybrid:
+            return QdrantVectorStore(
+                client=self.client,
+                collection_name=self.collection_name,
+                embedding=self.embedding_model,
+                sparse_embedding=self.sparse_embedding,
+                retrieval_mode=RetrievalMode.HYBRID,
+                vector_name=DENSE_VECTOR_NAME,
+                sparse_vector_name=SPARSE_VECTOR_NAME,
+            )
         return QdrantVectorStore(
             client=self.client,
             collection_name=self.collection_name,

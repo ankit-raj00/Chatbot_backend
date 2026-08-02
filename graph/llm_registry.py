@@ -1,12 +1,16 @@
 """
 LLM Registry — singleton LLM instances per model name, wrapped with circuit breaker.
 
-WHY: ChatGoogleGenerativeAI() instantiates an HTTP client on creation.
-     Creating it fresh on every LangGraph node execution wastes time and
-     resources. This registry creates each model once and reuses it.
+Models are served via OmniRoute, an OpenAI-compatible gateway, so we use
+LangChain's ChatOpenAI pointed at OMNIROUTE_BASE_URL. Config is env-driven so the
+same code targets a local OmniRoute now and a deployed one later.
 
-WHY circuit breaker: If Gemini API is down, we fail fast instead of
-     letting 100 concurrent requests each wait through 30s backoff = system hangs.
+WHY a registry: ChatOpenAI instantiates an HTTP client on creation. Creating it
+     fresh on every LangGraph node execution wastes time and resources; this
+     registry creates each model once and reuses it.
+
+WHY circuit breaker: If the gateway is down, we fail fast instead of letting many
+     concurrent requests each wait through backoff = system hangs.
 
 Usage:
     from graph.llm_registry import get_llm
@@ -17,29 +21,34 @@ Usage:
 
 import os
 import logging
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 from utils.circuit_breaker import gemini_breaker
 
 logger = logging.getLogger(__name__)
 
-# Registry: model_name -> ChatGoogleGenerativeAI instance
-_registry: dict[str, ChatGoogleGenerativeAI] = {}
+# OmniRoute (OpenAI-compatible) connection — env-driven so local/deployed both work.
+OMNIROUTE_BASE_URL = os.getenv("OMNIROUTE_BASE_URL", "http://localhost:20128/v1")
+OMNIROUTE_API_KEY  = os.getenv("OMNIROUTE_API_KEY", "")
+
+# Registry: model_name -> ChatOpenAI instance
+_registry: dict[str, ChatOpenAI] = {}
 
 
-def get_llm(model_name: str) -> ChatGoogleGenerativeAI:
+def get_llm(model_name: str) -> ChatOpenAI:
     """
     Returns a cached LLM instance for the given model name.
     Creates it on first call. Thread-safe for async (single event loop).
     """
     if model_name not in _registry:
-        logger.info(f"LLM registry: creating instance for {model_name}")
-        _registry[model_name] = ChatGoogleGenerativeAI(
+        logger.info(f"LLM registry: creating instance for {model_name} via {OMNIROUTE_BASE_URL}")
+        _registry[model_name] = ChatOpenAI(
             model=model_name,
             temperature=0.7,
-            max_tokens=None,
             max_retries=2,
             streaming=True,
-            google_api_key=os.getenv("GOOGLE_API_KEY"),
+            stream_usage=True,          # emit token usage on the streamed response
+            base_url=OMNIROUTE_BASE_URL,
+            api_key=OMNIROUTE_API_KEY,
         )
     return _registry[model_name]
 

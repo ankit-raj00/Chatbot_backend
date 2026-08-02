@@ -1,282 +1,332 @@
-from typing import Dict, Optional, List, Any
+"""
+MCP connection manager — builds real, spec-compliant connections (stdio / legacy
+SSE / Streamable HTTP) from a user's stored MCPServer config, using
+langchain-mcp-adapters' MultiServerMCPClient (which itself opens a fresh MCP
+session per tool call — no manual pooling/reconnect logic needed here).
+
+Scoped per (user_id, server_id) — NOT a single global pool. This matters: an
+earlier global-singleton-by-URL design meant one user's connected server (and
+its tools, including anything behind an API key or OAuth token) was callable by
+every other concurrent user's agent turn. Every public method here takes
+user_id explicitly and keys all state by (user_id, server_id).
+"""
 import asyncio
+import os
 import time
+from typing import Any
+
 import structlog
-logger = structlog.get_logger(__name__)
-from langchain_mcp_adapters.client import MultiServerMCPClient
+from bson import ObjectId
 from langchain_core.tools import BaseTool
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.sessions import Connection, create_session
+
+from core.database import mcp_servers_collection
+from utils.crypto import decrypt_dict_values
+
+logger = structlog.get_logger(__name__)
+
+DEFAULT_HTTP_TIMEOUT = 15.0
+DEFAULT_SSE_READ_TIMEOUT = 120.0
+TOOL_CACHE_TTL = 300  # 5 minutes
+
+
+def _backend_base_url() -> str:
+    return os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
+
+
+def _mcp_oauth_redirect_uri() -> str:
+    return f"{_backend_base_url()}/oauth/mcp/callback"
+
 
 class MCPConnectionManager:
-    """
-    Manages MCP server connections using LangChain's MultiServerMCPClient.
-    Strictly uses langchain-mcp-adapters without direct SDK usage or fastmcp.
-    """
-    
+    """Per-user MCP connection + tool-cache manager. Process-wide singleton, but
+    every piece of state inside it is keyed by (user_id, server_id)."""
+
     _instance = None
-    
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
         return cls._instance
-    
+
     def __init__(self):
         if self._initialized:
             return
-        # Store clients: Map URL -> MultiServerMCPClient
-        self._clients: Dict[str, MultiServerMCPClient] = {}
-        self._tool_cache: dict[str, tuple[list, float]] = {}   # url -> (tools, timestamp)
-        self._tool_cache_ttl: int = 300                         # 5 minutes
+        # (user_id, server_id) -> MultiServerMCPClient
+        self._clients: dict[tuple[str, str], MultiServerMCPClient] = {}
+        # (user_id, server_id) -> a hashable fingerprint of the config last used
+        # to build the client, so an edited server rebuilds instead of staying stale.
+        self._fingerprints: dict[tuple[str, str], tuple] = {}
+        # (user_id, server_id) -> (tools, cached_at)
+        self._tool_cache: dict[tuple[str, str], tuple[list[BaseTool], float]] = {}
         self._initialized = True
-    
-    async def connect(self, url: str) -> bool:
-        """
-        Register an MCP server via MultiServerMCPClient.
-        We create a separate client for each URL to support dynamic addition.
-        """
-        if url in self._clients:
-            logger.info(f"MCP Server already registered: {url}")
-            return True
-            
+
+    # ── Connection building ──────────────────────────────────────────────
+
+    def _fingerprint(self, server: dict) -> tuple:
+        """A hashable snapshot of the fields that affect the actual connection,
+        so we can detect "this server's config changed, rebuild the client"."""
+        return (
+            server.get("transport"),
+            server.get("url"),
+            server.get("command"),
+            tuple(server.get("args") or []),
+            tuple(sorted((server.get("env") or {}).items())),
+            tuple(sorted((server.get("headers") or {}).items())),
+            server.get("auth_type"),
+            server.get("oauth_authorized"),
+        )
+
+    def _build_connection(self, user_id: str, server: dict) -> Connection:
+        transport = server.get("transport", "http")
+        server_id = str(server["_id"])
+
+        if transport == "stdio":
+            return {
+                "transport": "stdio",
+                "command": server["command"],
+                "args": server.get("args") or [],
+                "env": decrypt_dict_values(server.get("env")),
+            }
+
+        url = server["url"]
+        auth_type = server.get("auth_type", "none")
+        conn: dict[str, Any] = {
+            "transport": transport,  # "sse" or "http"
+            "url": url,
+            "timeout": DEFAULT_HTTP_TIMEOUT,
+            "sse_read_timeout": DEFAULT_SSE_READ_TIMEOUT,
+        }
+
+        if auth_type == "headers":
+            headers = decrypt_dict_values(server.get("headers"))
+            if headers:
+                conn["headers"] = headers
+        elif auth_type == "oauth":
+            if not server.get("oauth_authorized"):
+                raise RuntimeError(
+                    f"MCP server '{server.get('name', server_id)}' has not been "
+                    "authorized yet. Connect it via Settings -> MCP Servers -> "
+                    "Authorize first."
+                )
+            from utils.mcp_oauth_flow import build_runtime_auth_provider
+            conn["auth"] = build_runtime_auth_provider(
+                user_id, server_id, url, _mcp_oauth_redirect_uri()
+            )
+
+        return conn  # type: ignore[return-value]
+
+    async def _get_or_build_client(self, user_id: str, server: dict) -> MultiServerMCPClient:
+        server_id = str(server["_id"])
+        key = (user_id, server_id)
+        fp = self._fingerprint(server)
+
+        if key in self._clients and self._fingerprints.get(key) == fp:
+            return self._clients[key]
+
+        conn = self._build_connection(user_id, server)
+        client = MultiServerMCPClient({server_id: conn})
+        self._clients[key] = client
+        self._fingerprints[key] = fp
+        self._tool_cache.pop(key, None)
+        logger.info("mcp.client_built", user_id=user_id, server_id=server_id, transport=server.get("transport"))
+        return client
+
+    # ── Public API ────────────────────────────────────────────────────────
+
+    async def get_tools_for_servers(self, user_id: str, server_ids: list[str]) -> list[BaseTool]:
+        """Fetch (cached, 5min TTL) LangChain tools for exactly the given
+        servers, scoped to this user. Ownership-checked: a server must belong
+        to user_id or be marked is_local (shared system server)."""
+        if not server_ids:
+            return []
+
         try:
-            logger.info(f"Registering MCP Client for: {url}")
-            
-            # Determine transport config
-            transport_config = {}
-            
-            if url.startswith("http://") or url.startswith("https://"):
-                # Remote Server (using http transport as per user feedback)
-                transport_config = {
-                    "url": url,
-                    "transport": "http"
-                }
-            elif url.endswith(".py"):
-                 # Local Python Server (stdio)
-                 # We assume key "command" is needed.
-                 transport_config = {
-                     "command": "python",
-                     "args": [url],
-                     "transport": "stdio"
-                 }
-            else:
-                 # Fallback/Assumption: Local executable or unknown
-                 # If it doesn't start with http, assume it's a command/path
-                 transport_config = {
-                     "command": url,
-                     "args": [],
-                     "transport": "stdio"
-                 }
-            
-            # Initialize Client
-            # Note: We use the URL itself as the server name key
-            client = MultiServerMCPClient({
-                url: transport_config
-            })
-            
-            # Validate connection by trying to fetch tools immediately?
-            # The client might be lazy. Let's try to get tools to fail fast.
-            # await client.get_tools() 
-            # Commented out to avoid immediate overhead/failure if lazy is desired.
-            
-            self._clients[url] = client
-            self.invalidate_tool_cache(url)
-            logger.info(f"Successfully registered: {url}")
-            return True
-            
-        except Exception as e:
-            logger.info(f"Failed to register MCP server {url}: {e}")
-            return False
-            
-    async def get_all_langchain_tools(self) -> List[BaseTool]:
-        """
-        Get LangChain compatible tools from ALL registered clients.
-        Tools are cached per-server for _tool_cache_ttl seconds.
-        On cache miss: fetches from server. On error: serves stale cache.
-        """
-        all_tools = []
+            object_ids = [ObjectId(sid) for sid in server_ids]
+        except Exception:
+            logger.warning("mcp.invalid_server_id", server_ids=server_ids)
+            return []
+
+        cursor = mcp_servers_collection.find({
+            "_id": {"$in": object_ids},
+            "is_active": True,
+            "$or": [{"user_id": user_id}, {"is_local": True}],
+        })
+        servers = await cursor.to_list(length=len(object_ids))
+
+        results = await asyncio.gather(
+            *(self._get_server_tools_cached(user_id, s) for s in servers),
+            return_exceptions=True,
+        )
+
+        per_server_tools: dict[str, list[BaseTool]] = {}
+        for server, res in zip(servers, results):
+            server_id = str(server["_id"])
+            if isinstance(res, Exception):
+                logger.warning("mcp.get_tools_failed", user_id=user_id, server_id=server_id, error=str(res))
+                continue
+            per_server_tools[server_id] = res
+
+        return self._merge_tools_collision_safe(servers, per_server_tools)
+
+    async def _get_server_tools_cached(self, user_id: str, server: dict) -> list[BaseTool]:
+        server_id = str(server["_id"])
+        key = (user_id, server_id)
         now = time.monotonic()
 
-        for url, client in self._clients.items():
-            cached_tools, cached_at = self._tool_cache.get(url, (None, 0.0))
-            cache_age = now - cached_at
+        cached_tools, cached_at = self._tool_cache.get(key, (None, 0.0))
+        if cached_tools is not None and (now - cached_at) < TOOL_CACHE_TTL:
+            return cached_tools
 
-            if cached_tools is not None and cache_age < self._tool_cache_ttl:
-                # Cache HIT
-                all_tools.extend(cached_tools)
-                continue
-
-            # Cache MISS — fetch from server
-            try:
-                tools = await client.get_tools()
-                self._tool_cache[url] = (tools, now)
-                all_tools.extend(tools)
-                logger.info(f"MCP tool cache refreshed for {url}: {len(tools)} tools")
-            except Exception as e:
-                logger.info(f"Error fetching tools from {url}: {e}")
-                if cached_tools is not None:
-                    # Serve stale cache on error rather than failing
-                    logger.info(f"Serving stale tool cache for {url} ({cache_age:.0f}s old)")
-                    all_tools.extend(cached_tools)
-
-        return all_tools
-        
-    def invalidate_tool_cache(self, url: str = None) -> None:
-        """
-        Invalidate the tool cache. Call after connecting a new server
-        or when the user adds/removes tools.
-        url=None invalidates all servers.
-        """
-        if url:
-            self._tool_cache.pop(url, None)
-        else:
-            self._tool_cache.clear()
-        logger.info(f"MCP tool cache invalidated for: {url or 'all servers'}")
-        
-    async def get_tools_from_server(self, url: str) -> List[BaseTool]:
-        """
-        Get LangChain compatible tools from A SPECIFIC registered client.
-        """
-        if url not in self._clients:
-             raise ValueError(f"MCP server not connected: {url}")
-             
-        client = self._clients[url]
+        client = await self._get_or_build_client(user_id, server)
         try:
-             return await client.get_tools()
+            tools = await asyncio.wait_for(client.get_tools(), timeout=DEFAULT_HTTP_TIMEOUT + 5)
+            self._tool_cache[key] = (tools, now)
+            return tools
+        except Exception:
+            if cached_tools is not None:
+                logger.warning("mcp.tools_stale_fallback", user_id=user_id, server_id=server_id)
+                return cached_tools
+            raise
+
+    def _merge_tools_collision_safe(
+        self, servers: list[dict], per_server_tools: dict[str, list[BaseTool]]
+    ) -> list[BaseTool]:
+        """Merge tool lists from multiple servers; if two servers expose a tool
+        with the same name, prefix BOTH with their server name so neither
+        silently shadows the other in the agent's tool map."""
+        name_owners: dict[str, set[str]] = {}
+        names_by_server: dict[str, list[str]] = {}
+        for server_id, tools in per_server_tools.items():
+            names_by_server[server_id] = [t.name for t in tools]
+            for t in tools:
+                name_owners.setdefault(t.name, set()).add(server_id)
+        colliding_names = {name for name, owners in name_owners.items() if len(owners) > 1}
+
+        server_names = {str(s["_id"]): s.get("name", str(s["_id"])) for s in servers}
+
+        merged: list[BaseTool] = []
+        for server_id, tools in per_server_tools.items():
+            prefix = "".join(c if c.isalnum() else "_" for c in server_names[server_id])
+            for t in tools:
+                if t.name in colliding_names:
+                    new_name = f"{prefix}_{t.name}"
+                    logger.info("mcp.tool_name_collision", tool=t.name, server_id=server_id, renamed_to=new_name)
+                    t = t.model_copy(update={"name": new_name})
+                merged.append(t)
+        return merged
+
+    async def disconnect(self, user_id: str, server_id: str) -> None:
+        key = (user_id, server_id)
+        self._clients.pop(key, None)
+        self._fingerprints.pop(key, None)
+        self._tool_cache.pop(key, None)
+        logger.info("mcp.disconnected", user_id=user_id, server_id=server_id)
+
+    def invalidate_tool_cache(self, user_id: str, server_id: str) -> None:
+        self._tool_cache.pop((user_id, server_id), None)
+
+    async def test_connection(self, user_id: str, server: dict, timeout: float = 15.0) -> dict:
+        """Connect fresh (bypassing any cache) and list tools once. Real error
+        messages are surfaced — never rewritten into a reassuring guess."""
+        try:
+            conn = self._build_connection(user_id, server)
         except Exception as e:
-             logger.info(f"Error fetching tools from {url}: {e}")
-             raise e
-        
-    async def call_tool_by_name(self, name: str, args: dict) -> Any:
-        """
-        Finds the tool in any registered client and executes it.
-        Uses the LangChain tool's own ainvoke method.
-        """
-        # 1. Get all tools (expensive? maybe cache tools later)
-        tools = await self.get_all_langchain_tools()
-        
-        # 2. Find tool
-        target_tool = next((t for t in tools if t.name == name), None)
-        
-        if not target_tool:
-            raise ValueError(f"Tool '{name}' not found on any connected server.")
-            
-        # 3. Execute
-        # LangChain tools support .ainvoke(args)
-        logger.info(f"Executing MCP tool via Adapter: {name}")
-        return await target_tool.ainvoke(args)
-        
-    # --- Legacy Methods (Stubs/Depracated) ---
-    
-    def get_active_connections(self) -> list[str]:
-        return list(self._clients.keys())
+            return {"status": "error", "error": str(e), "tools": []}
 
-    async def disconnect(self, url: str):
-        if url in self._clients:
-            del self._clients[url]
-            logger.info(f"Unregistered: {url}")
+        try:
+            async with create_session(conn) as session:
+                await asyncio.wait_for(session.initialize(), timeout=timeout)
+                result = await asyncio.wait_for(session.list_tools(), timeout=timeout)
+            tools = [{"name": t.name, "description": t.description or ""} for t in (result.tools or [])]
+            return {"status": "connected", "tools": tools}
+        except asyncio.TimeoutError:
+            return {"status": "error", "error": f"Connection timed out after {timeout}s", "tools": []}
+        except Exception as e:
+            return {"status": "error", "error": str(e), "tools": []}
 
-    async def disconnect_all(self):
-        self._clients.clear()
-        
-    async def get_available_resources(self) -> List[Dict]:
-        """Aggregate resources from all clients (Robust Metadata Version)"""
+    # ── Resources / prompts (used for system-prompt context injection) ─────
+
+    async def get_available_resources(self, user_id: str, server_ids: list[str]) -> list[dict]:
         all_resources = []
-        for url, client in self._clients.items():
+        servers = await self._fetch_servers(user_id, server_ids)
+        for server in servers:
+            server_id = str(server["_id"])
             try:
-                # Use session context to access RAW MCP features (bypassing LangChain's buggy helpers)
-                async with client.session(url) as session:
-                    # session.list_resources() returns ListResourcesResult
+                client = await self._get_or_build_client(user_id, server)
+                async with client.session(server_id) as session:
                     result = await session.list_resources()
-                    
-                    if result and result.resources:
-                        logger.info(f"--- Fetched Resources from {url} ---")
-                        for r in result.resources:
-                            # Standard attributes on MCP Resource object
-                            uri = r.uri
-                            name = r.name
-                            desc = r.description or "No description provided"
-                            mime_type = r.mimeType or "application/octet-stream"
-                            
-                            # Debug Print for User
-                            logger.info(f"Resource found: {name} ({uri})")
-                            logger.info(f"  > Description: {desc}")
-                            logger.info(f"  > MimeType: {mime_type}")
-                            
-                            all_resources.append({
-                                "uri": uri,
-                                "name": name,
-                                "description": desc,
-                                "mimeType": mime_type,
-                                "source_url": url
-                            })
-                        logger.info("---------------------------------------")
+                    for r in result.resources or []:
+                        all_resources.append({
+                            "uri": r.uri, "name": r.name,
+                            "description": r.description or "No description provided",
+                            "mimeType": r.mimeType or "application/octet-stream",
+                            "source_server_id": server_id,
+                        })
             except Exception as e:
-                logger.info(f"Error fetching resources from {url}: {e}")
+                logger.warning("mcp.resources_failed", server_id=server_id, error=str(e))
         return all_resources
-        
-    async def load_resource(self, uri: str) -> str:
-        """Load a resource content"""
-        # Try all clients to find who owns the URI
-        # Optimally we would map URI schemes to servers, but simple iteration works for now.
-        for url, client in self._clients.items():
-            try:
-                async with client.session(url) as session:
-                    # Create ReadResourceRequest? or helper?
-                    # session.read_resource(uri) usually works
-                    result = await session.read_resource(uri)
-                    # result.contents is list of TextResourceContents or BlobResourceContents
-                    if result and result.contents:
-                        # Concatenate contents? usually just one
-                        content_str = ""
-                        for c in result.contents:
-                             if hasattr(c, "text") and c.text:
-                                 content_str += c.text
-                             elif hasattr(c, "blob") and c.blob:
-                                 content_str += f"[Blob: {c.mimeType}]"
-                        return content_str
-            except Exception:
-                # Not found on this server or error, try next
-                continue
-                
-        raise ValueError(f"Resource not found: {uri}")
 
-    async def get_available_prompts(self) -> List[Dict]:
-        """Aggregate prompts from all clients"""
+    async def get_available_prompts(self, user_id: str, server_ids: list[str]) -> list[dict]:
         all_prompts = []
-        for url, client in self._clients.items():
+        servers = await self._fetch_servers(user_id, server_ids)
+        for server in servers:
+            server_id = str(server["_id"])
             try:
-                async with client.session(url) as session:
+                client = await self._get_or_build_client(user_id, server)
+                async with client.session(server_id) as session:
                     result = await session.list_prompts()
-                    if result and result.prompts:
-                        for p in result.prompts:
-                            all_prompts.append({
-                                "name": p.name,
-                                "description": p.description,
-                                "arguments": [
-                                    {"name": arg.name, "description": arg.description, "required": arg.required}
-                                    for arg in (p.arguments or [])
-                                ],
-                                "source_url": url
-                            })
+                    for p in result.prompts or []:
+                        all_prompts.append({
+                            "name": p.name, "description": p.description,
+                            "arguments": [
+                                {"name": a.name, "description": a.description, "required": a.required}
+                                for a in (p.arguments or [])
+                            ],
+                            "source_server_id": server_id,
+                        })
             except Exception as e:
-                logger.info(f"Error fetching prompts from {url}: {e}")
+                logger.warning("mcp.prompts_failed", server_id=server_id, error=str(e))
         return all_prompts
-    
-    async def get_prompt(self, name: str, arguments: Dict[str, Any] = None) -> Any:
-        """Get/Execute a prompt"""
-        # We need to find the server that has this prompt.
-        for url, client in self._clients.items():
+
+    async def load_resource(self, user_id: str, server_ids: list[str], uri: str) -> str:
+        """Read a single MCP resource by URI, searching only the given
+        (user-scoped) servers — not every server ever connected process-wide."""
+        servers = await self._fetch_servers(user_id, server_ids)
+        for server in servers:
+            server_id = str(server["_id"])
             try:
-                async with client.session(url) as session:
-                     result = await session.get_prompt(name, arguments)
-                     return result
-            except Exception:
+                client = await self._get_or_build_client(user_id, server)
+                async with client.session(server_id) as session:
+                    result = await session.read_resource(uri)
+                    if result and result.contents:
+                        parts = []
+                        for c in result.contents:
+                            if getattr(c, "text", None):
+                                parts.append(c.text)
+                            elif getattr(c, "blob", None):
+                                parts.append(f"[Blob: {getattr(c, 'mimeType', 'unknown')}]")
+                        return "".join(parts)
+            except Exception as e:
+                logger.debug("mcp.resource_not_on_server", server_id=server_id, uri=uri, error=str(e))
                 continue
-        raise ValueError(f"Prompt not found: {name}")
+        raise ValueError(f"Resource not found on any selected server: {uri}")
 
-    # Note: Resource caching is handled by the client/session now.
-    def get_cached_resources(self, url: str) -> List:
-        return []
+    async def _fetch_servers(self, user_id: str, server_ids: list[str]) -> list[dict]:
+        if not server_ids:
+            return []
+        try:
+            object_ids = [ObjectId(sid) for sid in server_ids]
+        except Exception:
+            return []
+        cursor = mcp_servers_collection.find({
+            "_id": {"$in": object_ids}, "is_active": True,
+            "$or": [{"user_id": user_id}, {"is_local": True}],
+        })
+        return await cursor.to_list(length=len(object_ids))
 
-# Global instance
+
+# Global instance — internally scoped per (user_id, server_id), see class docstring.
 mcp_manager = MCPConnectionManager()

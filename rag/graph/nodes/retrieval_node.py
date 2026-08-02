@@ -84,22 +84,30 @@ class RetrievalNode:
 
         search_kwargs = {"k": 5}
 
-        # ── File-level filtering by UUID (needs payload index on metadata.file_id) ──
-        # Filtering by file_id (UUID) not filename:
-        #   - Unique per upload even if same filename is re-uploaded
-        #   - Isolated per user — no cross-user leakage
+        # ── TENANCY GUARD: user_id is a MANDATORY filter ──────────────────────
+        # Without it, similarity search returns EVERY user's chunks. Refuse.
+        user_id = state.get("user_id")
+        if not user_id:
+            logger.error("🔒 RAG retrieve called without user_id — refusing (tenancy guard)")
+            return {**state, "documents": []}
+
+        must_conditions = [
+            models.FieldCondition(
+                key="metadata.user_id",
+                match=models.MatchValue(value=user_id),
+            )
+        ]
+        # Optional file-level narrowing by UUID (unique per upload).
         selected_file_ids = state.get("selected_file_ids")
         if selected_file_ids and isinstance(selected_file_ids, list) and len(selected_file_ids) > 0:
             logger.info(f"   🛡️ File Filter (by UUID): {selected_file_ids}")
-            file_filter = models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="metadata.file_id",      # UUID stored at ingestion time
-                        match=models.MatchAny(any=selected_file_ids)
-                    )
-                ]
+            must_conditions.append(
+                models.FieldCondition(
+                    key="metadata.file_id",
+                    match=models.MatchAny(any=selected_file_ids),
+                )
             )
-            search_kwargs["filter"] = file_filter
+        search_kwargs["filter"] = models.Filter(must=must_conditions)
 
         retriever = self.vector_store.as_retriever(
             search_type=search_strategy,
@@ -129,12 +137,12 @@ class RetrievalNode:
 
 async def parallel_retrieve_node(state: RAGGraphState) -> RAGGraphState:
     """
-    Runs Qdrant vector search and Tavily web search in parallel.
+    Runs Qdrant vector search and TinyFish web search in parallel.
     Merges results, deduplicates by content hash.
     Falls back gracefully if either source fails.
 
     WHY asyncio.gather with return_exceptions=True:
-        If Tavily is down or key is missing, we still get Qdrant results.
+        If web search is down or key is missing, we still get Qdrant results.
         The exception is caught per-source, not globally.
     """
     import asyncio
@@ -157,21 +165,11 @@ async def parallel_retrieve_node(state: RAGGraphState) -> RAGGraphState:
         })
         return result_state.get("documents", [])
 
-    # ── Task 2: Tavily web search ─────────────────────────────────
+    # ── Task 2: TinyFish web search ───────────────────────────────
     async def run_web_search():
-        from langchain_tavily import TavilySearch
-        from langchain_core.documents import Document
+        from rag.tools.web_search import search_web
         try:
-            tool = TavilySearch(max_results=3)
-            results = tool.invoke({"query": question})
-            docs = []
-            if isinstance(results, list):
-                for r in results:
-                    docs.append(Document(
-                        page_content=r.get("content", ""),
-                        metadata={"source": r.get("url", "web_search"), "type": "web"}
-                    ))
-            return docs
+            return await search_web(question, max_results=3)
         except Exception as e:
             logger.warning(f"Parallel web search failed: {e}")
             return []

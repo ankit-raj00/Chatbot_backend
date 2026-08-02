@@ -19,14 +19,16 @@ Pillow
 cloudinary
 langchain
 langchain-google-genai
+langchain-openai
 langgraph
-langchain-mcp-adapters
+langchain-mcp-adapters==0.3.0
+cryptography
 httpx
 llama-parse
 qdrant-client
 langchain-community
 langchain-qdrant
-langchain_tavily
+tinyfish
 nest_asyncio
 tenacity
 
@@ -71,3 +73,6 @@ pytest-asyncio
 # unstructured
 # langchain-unstructured
 # python-magic-bin ; sys_platform == 'win32'
+
+# ─── Hybrid retrieval + reranking (CPU/ONNX, no torch) ───────
+fastembed

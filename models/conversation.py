@@ -6,7 +6,7 @@ class Conversation(BaseModel):
     id: Optional[str] = Field(None, alias="_id")
     user_id: str  # Reference to user
     title: str = "New Conversation"
-    mcp_server_url: Optional[str] = None
+    mcp_server_id: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
     
@@ -16,4 +16,4 @@ class Conversation(BaseModel):
 
 class ConversationCreate(BaseModel):
     title: Optional[str] = "New Conversation"
-    mcp_server_url: Optional[str] = None
+    mcp_server_id: Optional[str] = None

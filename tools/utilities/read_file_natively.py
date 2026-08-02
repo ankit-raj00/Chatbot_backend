@@ -6,48 +6,58 @@ logger = logging.getLogger(__name__)
 
 def make_read_file_natively_tool(user_id: str, conversation_id: str):
     
-    async def read_file_natively(sandbox_path: str) -> list:
-        """Call this tool if you want to load a user's uploaded file natively into your multimodal context.
-        Use this for Images, PDFs, and large data files (like CSVs) that you prefer to read directly 
-        using your massive context window rather than writing python scripts.
-        
+    async def read_file_natively(sandbox_path: str) -> str:
+        """Look up how to access an uploaded file.
+
+        You usually do NOT need this tool:
+          - IMAGES the user uploads are shown to you directly in their message —
+            just look at them and describe/analyze them. (Images cannot be loaded
+            through a tool result on this platform, so this tool will not return
+            the picture.)
+          - NON-IMAGE files (CSV, PDF, code, data) live in your sandbox — read
+            them with run_python / run_shell.
+
+        This tool only returns guidance text pointing you at the right approach.
+
         Args:
-            sandbox_path: The path of the file, e.g., 'uploads/data.csv' or 'uploads/image.png'.
-            
-        Returns:
-            A multimodal attachment part if successful, or an error string.
+            sandbox_path: The path of the file, e.g., 'uploads/data.csv'.
         """
-        # Find the most recent message in this conversation that has attachments
         cursor = messages_collection.find(
             {"conversation_id": conversation_id, "user_id": user_id, "attachments": {"$exists": True, "$ne": None}}
         ).sort("timestamp", -1).limit(50)
-        
+
         async for msg in cursor:
-            attachments = msg.get("attachments", [])
-            for att in attachments:
+            for att in msg.get("attachments", []):
                 att_path = att.get("sandbox_path", "")
                 att_name = att.get("original_name", "")
-                
-                # Fuzzy match: handle exact path, original name, or just the filename part
                 if att_path == sandbox_path or att_name == sandbox_path or att_path.endswith(f"/{sandbox_path}") or sandbox_path.endswith(f"/{att_name}"):
-                    gemini_uri = att.get("gemini_uri")
-                    mime_type = att.get("mime_type", "")
-                    if gemini_uri:
-                        logger.info(f"Loaded {sandbox_path} natively for agent.")
-                        return [
-                            {"type": "text", "text": f"Successfully loaded {sandbox_path} into context natively."},
-                            {"type": "file", "file_id": gemini_uri, "mime_type": mime_type}
-                        ]
-        
-        return f"Error: Could not find a native Gemini File API URI for '{sandbox_path}'. It may have expired or was not uploaded correctly."
-        
+                    mime_type = (att.get("mime_type") or "")
+                    is_image = mime_type.startswith("image/") or att_name.lower().endswith(
+                        (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+                    )
+                    if is_image:
+                        return (
+                            f"'{att_name}' is an image. If the user uploaded it in this turn it is "
+                            f"already visible to you above — describe/analyze it directly. If you "
+                            f"cannot see it (it was uploaded in an earlier turn), ask the user to "
+                            f"re-attach it; images cannot be re-loaded through a tool result."
+                        )
+                    return (
+                        f"'{sandbox_path}' is not an image (mime: {mime_type or 'unknown'}). "
+                        f"Read it from your sandbox, e.g. "
+                        f"run_python(\"print(open('{att_path or sandbox_path}').read()[:2000])\") "
+                        f"or with pandas for tabular data."
+                    )
+
+        return f"Error: Could not find an uploaded file matching '{sandbox_path}'."
+
     from pydantic import BaseModel, Field
     class ReadFileNativelyInput(BaseModel):
-        sandbox_path: str = Field(description="The path of the file, e.g., 'uploads/data.csv' or 'uploads/image.png'")
+        sandbox_path: str = Field(description="The path of the file, e.g., 'uploads/data.csv'")
 
     return StructuredTool.from_function(
         coroutine=read_file_natively,
         name="read_file_natively",
-        description="Load a user's uploaded file natively into your context (for Images, PDFs, etc).",
+        description="Guidance on accessing an uploaded file. Uploaded images are already visible to you directly (no tool needed); non-image files are read via run_python/run_shell.",
         args_schema=ReadFileNativelyInput
     )

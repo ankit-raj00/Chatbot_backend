@@ -8,9 +8,10 @@ Endpoints:
 """
 
 import os
+import mimetypes
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from core.middleware import get_current_user
 
 router = APIRouter(prefix="/outputs", tags=["Outputs"])
@@ -24,6 +25,34 @@ def _user_dir(user_id: str) -> Path:
     p = workspace_for(user_id) / "outputs"
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+async def _serve_cloudinary(cloudinary_url: str, filename: str) -> StreamingResponse:
+    """
+    Stream a file's bytes from Cloudinary THROUGH this backend (same-origin).
+
+    WHY: a 302 redirect to Cloudinary breaks in-browser preview — a cross-origin
+    `fetch(..., {credentials:'include'})` can't read Cloudinary's response (no CORS
+    headers), even though a plain <a> download follows the redirect fine. Proxying
+    the bytes keeps preview AND download working, and lazily re-hydrates files that
+    were evicted from the local cache (e.g. after a server restart/redeploy).
+    """
+    import httpx
+
+    media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+    async def _iter():
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            async with client.stream("GET", cloudinary_url) as resp:
+                resp.raise_for_status()
+                async for chunk in resp.aiter_bytes(chunk_size=65536):
+                    yield chunk
+
+    return StreamingResponse(
+        _iter(),
+        media_type=media_type,
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
 
 
 @router.get("/list")
@@ -110,16 +139,16 @@ async def download_my_output(
     """
     user_id   = str(current_user["_id"])
     file_path = _user_dir(user_id) / filename
-    
+
     if not file_path.exists():
-        # Fallback to Cloudinary
+        # Local cache miss — stream from Cloudinary through the backend (same-origin
+        # so browser preview works, not a cross-origin 302 that CORS blocks).
         from core.database import user_outputs_collection
-        from fastapi.responses import RedirectResponse
         output_doc = await user_outputs_collection.find_one({"user_id": user_id, "filename": filename})
         if output_doc and output_doc.get("cloudinary_url"):
-            return RedirectResponse(url=output_doc.get("cloudinary_url"))
+            return await _serve_cloudinary(output_doc["cloudinary_url"], filename)
         raise HTTPException(status_code=404, detail=f"File '{filename}' not found.")
-        
+
     if file_path.suffix.lower() not in ALLOWED_EXT:
         raise HTTPException(status_code=400, detail="File type not permitted")
     try:
@@ -148,14 +177,13 @@ async def download_output(
 
     file_path = _user_dir(user_id) / filename
     if not file_path.exists():
-        # Fallback to Cloudinary
+        # Local cache miss — stream from Cloudinary through the backend (same-origin).
         from core.database import user_outputs_collection
-        from fastapi.responses import RedirectResponse
         output_doc = await user_outputs_collection.find_one({"user_id": user_id, "filename": filename})
         if output_doc and output_doc.get("cloudinary_url"):
-            return RedirectResponse(url=output_doc.get("cloudinary_url"))
+            return await _serve_cloudinary(output_doc["cloudinary_url"], filename)
         raise HTTPException(status_code=404, detail="File not found")
-        
+
     if file_path.suffix.lower() not in ALLOWED_EXT:
         raise HTTPException(status_code=404, detail="File not found")
 

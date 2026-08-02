@@ -1,7 +1,7 @@
 """
 ChatController — thin HTTP layer. All business logic lives in ChatService.
-This controller handles only file upload processing (Gemini + Cloudinary)
-which requires the Gemini client and remains infrastructure-level code.
+This controller handles only file upload pre-processing (Cloudinary + sandbox),
+then delegates to ChatService.
 """
 
 import os
@@ -11,7 +11,6 @@ import tempfile
 from datetime import datetime
 
 from fastapi import HTTPException
-from google import genai
 
 from services.chat_service import ChatService
 from config.model_config import ModelConfig
@@ -24,48 +23,53 @@ class ChatController:
     """Handles file upload pre-processing, then delegates to ChatService."""
 
     def __init__(self):
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            raise ValueError("GOOGLE_API_KEY environment variable not set")
-        self.gemini_client = genai.Client(api_key=api_key)
+        # No provider client needed here: chat runs via OmniRoute, and uploaded
+        # files are stored in Cloudinary + the sandbox (images are read back with
+        # their Cloudinary URL via the read_file_natively tool).
+        pass
 
     async def process_chat_stream(
         self,
         user_id: str,
         message: str,
         conversation_id: str = None,
-        mcp_server_urls: list[str] = None,
-        model: str = "gemini-2.5-flash",
+        mcp_server_ids: list[str] = None,
+        model: str = None,
         enabled_tools: list[str] = None,
         selected_files: list[str] = None,
         files: list = None,
     ):
         """Thin entry point. Processes file uploads then delegates to ChatService.stream()."""
 
-        # Validate model
-        if not ModelConfig.is_valid_model(model):
+        # Validate model (defaults to the configured OmniRoute model)
+        if not model or not ModelConfig.is_valid_model(model):
             model = ModelConfig.DEFAULT_MODEL
 
         if files and not ModelConfig.supports_images(model):
             yield f"data: {json.dumps({'error': 'Selected model does not support files'})}\n\n"
             return
 
-        # Process file uploads (Gemini Files API + Cloudinary)
+        # Process file uploads (sandbox + Cloudinary)
         attachments = []
         files_content_parts = []
 
         if files:
             files_content_parts, attachments = await self._process_uploads(user_id, files)
 
-        # Restore missing outputs from Cloudinary before running the agent
-        await self._restore_missing_outputs(user_id)
+        # Re-hydrate any previously-generated outputs that aren't on local disk
+        # (e.g. evicted by cleanup, or gone after a restart). Fire-and-forget +
+        # parallel, so it NEVER blocks the first streamed token. The local
+        # workspace is a cache; Cloudinary is the durable source of truth.
+        from utils.background_tasks import spawn
+        from utils.output_store import restore_outputs_background
+        spawn(restore_outputs_background(user_id), name="restore_outputs")
 
         # Delegate all streaming logic to ChatService
         async for chunk in ChatService.stream(
             user_id=user_id,
             message=message,
             conversation_id=conversation_id,
-            mcp_server_urls=mcp_server_urls,
+            mcp_server_ids=mcp_server_ids,
             model=model,
             enabled_tools=enabled_tools,
             selected_files=selected_files,
@@ -73,32 +77,6 @@ class ChatController:
             attachments=attachments,
         ):
             yield chunk
-
-    async def _restore_missing_outputs(self, user_id: str):
-        """Restore any missing generated files from Cloudinary before agent runs."""
-        from core.database import user_outputs_collection
-        from utils.workspace import workspace_for
-        from utils.cloudinary_handler import CloudinaryHandler
-        
-        ws_dir = workspace_for(user_id)
-        outputs_dir = ws_dir / "outputs"
-        
-        try:
-            cloudinary = CloudinaryHandler()
-            
-            # Get all files tracked for this user
-            cursor = user_outputs_collection.find({"user_id": user_id})
-            async for output_doc in cursor:
-                filename = output_doc.get("filename")
-                cloudinary_url = output_doc.get("cloudinary_url")
-                
-                if filename and cloudinary_url:
-                    local_path = outputs_dir / filename
-                    if not local_path.exists():
-                        logger.info(f"Restoring missing file {filename} from Cloudinary")
-                        await cloudinary.download_file(cloudinary_url, target_path=str(local_path))
-        except Exception as e:
-            logger.warning(f"Failed to restore missing outputs from Cloudinary: {e}")
 
     def _save_to_sandbox(self, user_id: str, filename: str, content: bytes) -> str:
         """Copy uploaded file into the user's sandbox uploads/ dir.
@@ -120,12 +98,26 @@ class ChatController:
         return f"uploads/{dest.name}"
 
     async def _process_uploads(self, user_id: str, files: list) -> tuple[list[dict], list[dict]]:
-        """Upload files to Gemini Files API and Cloudinary. Returns (content_parts, attachments)."""
+        """Save uploads to the sandbox and Cloudinary. Returns (content_parts, attachments).
+
+        content_parts stays empty: the agent SEES images via the analyze_image
+        tool (a vision sub-call), not by inlining them into the user message.
+        This keeps the mechanism consistent across turns (uploaded images AND
+        images the agent generates), works around the gateway's inability to
+        take image URLs / tool-message images, and surfaces as an explicit step
+        in the UI. Every file is written to the sandbox so analyze_image /
+        run_python can reach it by path.
+        """
         from utils.cloudinary_handler import CloudinaryHandler
         cloudinary = CloudinaryHandler()
 
         content_parts = []
         attachments = []
+
+        def _is_image(mime: str | None, name: str) -> bool:
+            if mime and mime.startswith("image/"):
+                return True
+            return name.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"))
 
         for file_obj in files:
             tmp_path = None
@@ -137,44 +129,22 @@ class ChatController:
                     tmp_path = tmp.name
 
                 sandbox_path = self._save_to_sandbox(user_id, file_obj.filename, content)
-                
+
                 cloudinary_url, public_id = None, None
                 try:
                     cloudinary_url, public_id = await cloudinary.upload_file(tmp_path)
                 except Exception as e:
                     logger.error(f"Cloudinary upload failed for {file_obj.filename}: {e}")
-                
-                try:
-                    gemini_file = self.gemini_client.files.upload(file=tmp_path)
-                    
-                    # We no longer automatically inject files into content_parts here.
-                    # Instead, we just pass the info to the sandbox. The LLM can use a tool
-                    # to read the file natively if it chooses to do so.
-                        
-                    attachments.append({
-                        "type": "file",
-                        "original_name": file_obj.filename,
-                        "mime_type": gemini_file.mime_type,
-                        "cloudinary_url": cloudinary_url,
-                        "cloudinary_public_id": public_id,
-                        "gemini_uri": gemini_file.uri,
-                        "gemini_name": gemini_file.name,
-                        "gemini_uploaded_at": datetime.now(),
-                        "sandbox_path": sandbox_path
-                    })
-                except Exception as e:
-                    logger.error(f"Gemini File API upload failed for {file_obj.filename}: {e}")
-                    # Still add attachment so the sandbox file is known
-                    attachments.append({
-                        "type": "file",
-                        "original_name": file_obj.filename,
-                        "mime_type": file_obj.content_type,
-                        "cloudinary_url": cloudinary_url,
-                        "cloudinary_public_id": public_id,
-                        "sandbox_path": sandbox_path
-                    })
 
-
+                attachments.append({
+                    "type": "file",
+                    "original_name": file_obj.filename,
+                    "mime_type": file_obj.content_type,
+                    "cloudinary_url": cloudinary_url,
+                    "cloudinary_public_id": public_id,
+                    "sandbox_path": sandbox_path,
+                    "is_image": _is_image(file_obj.content_type, file_obj.filename),
+                })
             finally:
                 if tmp_path and os.path.exists(tmp_path):
                     try:
