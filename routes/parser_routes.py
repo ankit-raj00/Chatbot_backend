@@ -8,6 +8,7 @@ frontend Parser page. Kept separate from the RAG ingestion flow on purpose —
 this is a standalone testing/eval feature.
 """
 import os
+import time
 import logging
 
 import httpx
@@ -15,6 +16,7 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, R
 from fastapi.responses import StreamingResponse
 from core.middleware import get_current_user
 from core.limiter import limiter
+from services.parser_dashboard_service import ParserDashboardService
 
 router = APIRouter(prefix="/api/parser", tags=["Parser"])
 logger = logging.getLogger(__name__)
@@ -56,6 +58,12 @@ async def parse_pdf(
     if len(content) > MAX_PDF_BYTES:
         raise HTTPException(413, f"File too large. Max {MAX_PDF_BYTES // (1024*1024)} MB")
 
+    t0 = time.perf_counter()
+    run_kwargs = dict(
+        filename=file.filename, source="eval_page", mode=mode, bytes_size=len(content),
+        user_id=str(current_user.get("_id")), user_email=current_user.get("email"),
+    )
+
     try:
         async with httpx.AsyncClient(timeout=600) as client:  # region mode can be slow
             resp = await client.post(
@@ -65,11 +73,28 @@ async def parse_pdf(
                 data={"mode": mode, "max_pages": str(max_pages), "judge": str(judge).lower()},
             )
     except httpx.RequestError as e:
+        await ParserDashboardService.record_run(
+            **run_kwargs, status="failed", duration_ms=int((time.perf_counter() - t0) * 1000),
+            error=f"parser service unreachable: {e}",
+        )
         raise HTTPException(502, f"Parser service unreachable: {e}")
 
+    duration_ms = int((time.perf_counter() - t0) * 1000)
     if resp.status_code != 200:
+        await ParserDashboardService.record_run(
+            **run_kwargs, status="failed", duration_ms=duration_ms,
+            error=f"parser service {resp.status_code}: {resp.text[:300]}",
+        )
         raise HTTPException(resp.status_code, f"Parser service error: {resp.text[:300]}")
-    return resp.json()
+
+    data = resp.json()
+    blocks = data.get("blocks") or []
+    await ParserDashboardService.record_run(
+        **run_kwargs, status="success" if blocks else "empty", duration_ms=duration_ms,
+        pages=data.get("pages"), blocks_count=len(blocks),
+        figures_count=len(data.get("images") or []), markdown=data.get("markdown"),
+    )
+    return data
 
 
 @router.post("/parse/stream")

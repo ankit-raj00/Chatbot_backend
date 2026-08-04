@@ -29,3 +29,4 @@ user_skills_collection = db["user_skills"]        # Phase 2b: skill vault
 user_outputs_collection = db["user_outputs"]      # Cloudinary persistent outputs
 mcp_oauth_tokens_collection = db["mcp_oauth_tokens"]  # Per (user_id, server_id) OAuth 2.1 tokens + client_info
 turn_steps_collection = db["turn_steps"]  # Incremental per-tool-call durability log (TTL-expired, see main.py)
+parser_runs_collection = db["parser_runs"]  # History of custom AWS PDF-parser calls, for the admin parser dashboard
