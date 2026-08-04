@@ -1,16 +1,23 @@
 """
 ChatService — thin orchestrator that coordinates all chat dependencies.
 
-Flow:
-    1. Save user message → get inserted_id
+stream() does the fast synchronous setup (resolve conversation, save the
+user message) and then hands actual agent execution to _run_turn(), which
+runs as a DETACHED background task tracked by services.turn_manager rather
+than being tied to the HTTP request that started it. stream() (and resume(),
+for a later/different request reattaching to the same turn) just become
+"viewers" of that task's live event feed via _view_turn() — so a client
+refresh/disconnect only drops one viewer, it doesn't cancel the generation.
+
+_run_turn() flow:
+    1. (done in stream(), before spawning) Save user message → get inserted_id
     2. Load history (cache-aware via HistoryService)
     3. Fetch MCP context (resources + prompts)
     4. Build system prompt via PromptBuilder (with skills listing)
-    5. Run Supervisor graph (routes to specialist subgraph)
-    6. Stream SSE events to client
-    7. Save AI response + token costs
-    8. Async memory extraction (non-blocking)
-    9. Invalidate history cache
+    5. Run the agent graph, publishing each event to turn_manager
+    6. Save AI response + token costs
+    7. Async memory extraction (non-blocking)
+    8. Invalidate history cache
 """
 
 import json
@@ -29,6 +36,7 @@ from core.database import messages_collection, conversations_collection
 from services.history_service import HistoryService
 from services.prompt_builder import PromptBuilder
 from services.memory_service import MemoryService
+from services.turn_manager import turn_manager
 from graph.builder import get_agent_graph
 from graph.nodes.common import ChatState
 from utils.mcp_connection_manager import mcp_manager
@@ -117,8 +125,7 @@ class ChatService:
     @staticmethod
     async def _persist_stopped_message(cid: str, user_id: str, content: str, timeline: list) -> None:
         """Persist a partial assistant message when a turn was stopped/cancelled,
-        so the streamed-so-far content isn't lost on reload. Runs as a detached
-        task (see stop handling in stream) so it survives the request teardown."""
+        so the streamed-so-far content isn't lost on reload."""
         try:
             await messages_collection.insert_one({
                 "conversation_id": cid,
@@ -147,13 +154,26 @@ class ChatService:
         attachments: list[dict] | None = None,
     ):
         """
-        Main streaming generator. Yields SSE-formatted strings.
+        Entry point for a NEW turn. Does the fast synchronous setup (resolve
+        conversation, save the user message), then hands off the actual
+        agent execution to a DETACHED background task (see turn_manager) and
+        streams it back to the caller. Because execution isn't tied to this
+        generator's lifetime, a client disconnect (tab refresh/close) here
+        only detaches this one viewer — the agent keeps running, and
+        `resume()` can reattach to it later (from this tab reloading or a
+        different one) and pick up exactly where it left off.
+
         Caller wraps this in a StreamingResponse with media_type="text/event-stream".
         """
         enabled_tools       = enabled_tools or []
         mcp_server_ids      = mcp_server_ids or []
         files_content_parts = files_content_parts or []
 
+        # Steps 1-2 aren't inside _run_turn's try/except (that only guards
+        # the spawned background task) — guard them here so a failure this
+        # early (bad conversation_id, a Mongo hiccup) still surfaces as a
+        # graceful SSE error instead of an unhandled 500 before any bytes
+        # are sent.
         try:
             # ── Step 1: Conversation ────────────────────────────────────
             conversation_id = await cls._ensure_conversation(
@@ -170,7 +190,99 @@ class ChatService:
                 "timestamp":       datetime.now()
             })
             inserted_user_msg_id = result.inserted_id
+        except Exception as e:
+            logger.error(f"ChatService.stream setup error: {e}", exc_info=True)
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            return
 
+        turn_id = str(uuid.uuid4())
+        task = spawn(
+            cls._run_turn(
+                turn_id, user_id, message, conversation_id, mcp_server_ids, model,
+                enabled_tools, selected_files, files_content_parts, attachments,
+                inserted_user_msg_id,
+            ),
+            name="agent_turn",
+        )
+        turn_manager.start(turn_id, conversation_id, user_id, task)
+
+        async for chunk in cls._view_turn(turn_id):
+            yield chunk
+
+    @classmethod
+    async def resume(cls, conversation_id: str, user_id: str):
+        """Reattach to an already-running turn for this conversation (e.g.
+        the page was reloaded mid-generation). Yields nothing but a single
+        'no active turn' error event if there isn't one — callers should
+        check has_active_turn() first to avoid this in the common case, but
+        it's handled gracefully either way (e.g. a race where the turn
+        finished between the check and this call)."""
+        turn_id = turn_manager.active_turn_id_for_conversation(conversation_id, user_id)
+        if not turn_id:
+            yield f"data: {json.dumps({'error': 'No active generation to resume.'})}\n\n"
+            return
+        async for chunk in cls._view_turn(turn_id):
+            yield chunk
+
+    @staticmethod
+    def has_active_turn(conversation_id: str, user_id: str) -> bool:
+        return turn_manager.active_turn_id_for_conversation(conversation_id, user_id) is not None
+
+    @staticmethod
+    async def stop_turn(conversation_id: str, user_id: str) -> bool:
+        return turn_manager.request_stop(conversation_id, user_id)
+
+    @classmethod
+    async def _view_turn(cls, turn_id: str):
+        """Shared by stream() (the turn's first viewer) and resume() (any
+        later viewer, possibly a different tab): attach to the turn's live
+        event feed, replay everything already published (so a late attacher
+        never sees a gap), then forward new events as they arrive until the
+        turn reaches a terminal state. Detaching (on break/return/exception)
+        never affects the underlying turn — only removes this one viewer."""
+        attached = turn_manager.attach(turn_id)
+        if not attached:
+            yield f"data: {json.dumps({'error': 'Turn not found or already finished.'})}\n\n"
+            return
+
+        queue, backlog, status = attached
+        try:
+            for event in backlog:
+                yield f"data: {json.dumps(event)}\n\n"
+            if status != "running":
+                # Turn already reached a terminal state before we attached —
+                # the backlog above already includes its final event.
+                return
+            while True:
+                event = await queue.get()
+                yield f"data: {json.dumps(event)}\n\n"
+                if "done" in event or "error" in event or "stopped" in event:
+                    break
+        finally:
+            turn_manager.detach(turn_id, queue)
+
+    @classmethod
+    async def _run_turn(
+        cls,
+        turn_id: str,
+        user_id: str,
+        message: str,
+        conversation_id: str,
+        mcp_server_ids: list[str],
+        model: str,
+        enabled_tools: list[str],
+        selected_files: list[str] | None,
+        files_content_parts: list[dict],
+        attachments: list[dict] | None,
+        inserted_user_msg_id,
+    ) -> None:
+        """The actual agent execution — runs as a detached background task
+        (see stream()), publishing every event to turn_manager instead of
+        yielding directly. Any number of viewers (stream()'s original caller,
+        resume() reattaching after a refresh, even a second tab) can watch
+        this run live or catch up on it; none of them can cancel it just by
+        disconnecting — only stop_turn() can, which cancels THIS task."""
+        try:
             # ── Step 4: Load history (Redis-cached) ─────────────────────
             history = await HistoryService.get_history(
                 conversation_id, user_id,
@@ -244,8 +356,10 @@ class ChatService:
                     # Unique per TURN (unlike thread_id, which is the stable
                     # conversation_id shared across many turns) — lets
                     # agent_tool_node log an incremental, crash-durable trail
-                    # of this specific turn's tool calls as they happen.
-                    "turn_id":        str(uuid.uuid4()),
+                    # of this specific turn's tool calls as they happen. Same
+                    # id turn_manager uses to track this run — one concept,
+                    # not two random uuids for the same turn.
+                    "turn_id":        turn_id,
                 },
                 # Each tool-call round trip (agent_node -> agent_tool_node -> agent_node)
                 # costs 2 steps. The agent is explicitly instructed to chain many tool
@@ -364,15 +478,15 @@ class ChatService:
                         if text:
                             full_response += text
                             _tl_add_text(text)
-                            yield f"data: {json.dumps({'chunk': text})}\n\n"
+                            turn_manager.publish(turn_id, {'chunk': text})
 
                 # Tool usage events
                 elif event_type == "on_tool_start":
                     tool_name = event.get("name")
                     tool_run_id = event.get("run_id")
                     tool_args = event.get("data", {}).get("input")
-                    yield f"data: {json.dumps({'status': f'Using tool: {tool_name}'})}\n\n"
-                    yield f"data: {json.dumps({'tool_call': {'name': tool_name, 'args': tool_args}})}\n\n"
+                    turn_manager.publish(turn_id, {'status': f'Using tool: {tool_name}'})
+                    turn_manager.publish(turn_id, {'tool_call': {'name': tool_name, 'args': tool_args}})
                     tool_steps.append({"name": tool_name, "args": tool_args, "status": "running", "run_id": tool_run_id})
                     timeline.append({"type": "tool", "name": tool_name, "args": tool_args, "status": "running", "run_id": tool_run_id})
 
@@ -388,14 +502,14 @@ class ChatService:
                             skill_data = {'name': skill_name, 'content': skill_content}
                             skills.append(skill_data)
                             timeline.append({"type": "skill", **skill_data})
-                            yield f"data: {json.dumps({'skill_used': skill_data})}\n\n"
+                            turn_manager.publish(turn_id, {'skill_used': skill_data})
 
                 elif event_type == "on_tool_end":
                     tool_name = event.get("name")
                     tool_run_id = event.get("run_id")
                     output    = event.get("data", {}).get("output", "")
                     _tl_complete_tool(tool_name, str(output), tool_run_id)
-                    yield f"data: {json.dumps({'tool_output': {'name': tool_name, 'result': str(output)}})}\n\n"
+                    turn_manager.publish(turn_id, {'tool_output': {'name': tool_name, 'result': str(output)}})
 
                     # NOTE: a regex-based "artifact" interception used to live here for
                     # write_to_file/create_pdf/create_docx/create_pptx/run_python. Removed:
@@ -459,7 +573,7 @@ class ChatService:
                 elif event_type == "on_custom_event" and event.get("name") == "exec_output":
                     data = event.get("data", {})
                     _tl_add_exec_output(data.get("tool", ""), data, event.get("run_id"))
-                    yield f"data: {json.dumps({'exec_output': data})}\n\n"
+                    turn_manager.publish(turn_id, {'exec_output': data})
 
 
                 # Token tracking and final text fallback
@@ -471,14 +585,14 @@ class ChatService:
                         if content and isinstance(content, str) and content not in full_response:
                             full_response += content
                             _tl_add_text(content)
-                            yield f"data: {json.dumps({'chunk': content})}\n\n"
+                            turn_manager.publish(turn_id, {'chunk': content})
                         elif isinstance(content, list):
                             text_parts = [p["text"] if isinstance(p, dict) and "text" in p else str(p) for p in content if isinstance(p, dict) and "text" in p or isinstance(p, str)]
                             text_str = "".join(text_parts)
                             if text_str and text_str not in full_response:
                                 full_response += text_str
                                 _tl_add_text(text_str)
-                                yield f"data: {json.dumps({'chunk': text_str})}\n\n"
+                                turn_manager.publish(turn_id, {'chunk': text_str})
 
                         usage = getattr(output_msg, "usage_metadata", None)
                         if usage:
@@ -526,7 +640,7 @@ class ChatService:
                     created_files.append(item)
                 if created_files:
                     timeline.append({"type": "files_created", "files": created_files})
-                    yield f"data: {json.dumps({'files_created': created_files})}\n\n"
+                    turn_manager.publish(turn_id, {'files_created': created_files})
             except Exception as _fe:
                 logger.warning(f"File detection failed (non-fatal): {_fe}")
 
@@ -563,22 +677,30 @@ class ChatService:
             )
 
             await HistoryService.invalidate(conversation_id)
-            yield f"data: {json.dumps({'done': True, 'conversation_id': conversation_id, 'agent': routed_agent})}\n\n"
+            turn_manager.publish(turn_id, {'done': True, 'conversation_id': conversation_id, 'agent': routed_agent})
+            turn_manager.finish(turn_id, "done")
 
-        except (asyncio.CancelledError, GeneratorExit):
-            # User pressed Stop (or the client disconnected). Starlette cancels the
-            # response task, which tears this generator down. Persist whatever
-            # streamed so far via a DETACHED task (awaiting inline here would be
-            # cancelled with us), then propagate the cancellation.
+        except asyncio.CancelledError:
+            # stop_turn() cancelled us (see turn_manager.request_stop) — this
+            # is a NORMAL, expected way for a turn to end now, not a client
+            # disconnect: a client disconnecting just detaches a viewer (see
+            # _view_turn) and does NOT reach this handler anymore, since this
+            # task's lifetime is independent of any one HTTP request. Persist
+            # whatever streamed so far, tell any attached viewers it stopped,
+            # and swallow the cancellation (a task that catches its own
+            # CancelledError and returns completes normally — appropriate
+            # here since this is an intentional, successful stop, not a
+            # crash).
             partial = locals().get("full_response", "") or ""
             tl = locals().get("timeline", []) or []
             cid = locals().get("conversation_id")
             if cid and (partial or tl):
-                spawn(cls._persist_stopped_message(cid, user_id, partial, tl), name="save_stopped")
-            raise
+                await cls._persist_stopped_message(cid, user_id, partial, tl)
+            turn_manager.publish(turn_id, {'stopped': True})
+            turn_manager.finish(turn_id, "stopped")
 
         except Exception as e:
-            logger.error(f"ChatService.stream error: {e}", exc_info=True)
+            logger.error(f"ChatService._run_turn error: {e}", exc_info=True)
             raw = str(e)
             low = raw.lower()
             if "recursion" in low and "limit" in low:
@@ -613,4 +735,5 @@ class ChatService:
             except Exception:
                 pass
 
-            yield f"data: {json.dumps({'error': friendly})}\n\n"
+            turn_manager.publish(turn_id, {'error': friendly})
+            turn_manager.finish(turn_id, "error")
