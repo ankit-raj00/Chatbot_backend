@@ -89,6 +89,23 @@ class ChatController:
         ):
             yield chunk
 
+    async def resume_stream(self, conversation_id: str, user_id: str):
+        """Reattach to an in-progress turn for this conversation (e.g. the
+        page was reloaded mid-generation) and keep streaming it live."""
+        async for chunk in ChatService.resume(conversation_id, user_id):
+            yield chunk
+
+    async def check_active_turn(self, conversation_id: str, user_id: str) -> dict:
+        """Cheap, non-streaming check for whether this conversation has a
+        turn in progress right now — the frontend calls this on page
+        load/reload to decide whether to call resume_stream()."""
+        return {"active": ChatService.has_active_turn(conversation_id, user_id)}
+
+    async def stop_generation(self, conversation_id: str, user_id: str) -> dict:
+        """Cancel this conversation's in-progress turn, if any."""
+        stopped = await ChatService.stop_turn(conversation_id, user_id)
+        return {"stopped": stopped}
+
     def _save_to_sandbox(self, user_id: str, conversation_id: str, filename: str, content: bytes) -> str:
         """Copy uploaded file into this conversation's sandbox uploads/ dir.
         Returns the path relative to the sandbox root (e.g. 'uploads/report.zip')."""

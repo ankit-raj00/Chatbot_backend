@@ -77,3 +77,38 @@ async def chat_stream_multimodal(
         ),
         media_type="text/event-stream"
     )
+
+
+@router.get("/{conversation_id}/active-turn")
+async def get_active_turn(
+    conversation_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Lightweight check: is a generation currently in progress for this
+    conversation? Call this on page load/reload before resume_stream so a
+    reload with nothing in progress doesn't open a pointless SSE connection."""
+    return await chat_controller.check_active_turn(conversation_id, str(current_user["_id"]))
+
+
+@router.get("/{conversation_id}/resume")
+async def resume_chat_stream(
+    conversation_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Reattach to an in-progress turn (e.g. after a page reload mid-generation)
+    and keep streaming it — replays everything already generated, then
+    continues live, same wire format as /stream."""
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        chat_controller.resume_stream(conversation_id, str(current_user["_id"])),
+        media_type="text/event-stream"
+    )
+
+
+@router.post("/{conversation_id}/stop")
+async def stop_chat_generation(
+    conversation_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Cancel this conversation's in-progress turn, if any."""
+    return await chat_controller.stop_generation(conversation_id, str(current_user["_id"]))
