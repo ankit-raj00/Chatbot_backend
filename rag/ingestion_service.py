@@ -30,6 +30,7 @@ from rag.chunking.splitter_factory import SplitterFactory
 from rag.chunking.block_chunker import chunk_blocks
 from rag.chunking.doc_router import classify_doc_type, profile_for
 from rag.vector_store.qdrant_manager import QdrantManager
+from services.ingestion_job_service import IngestionJobService
 
 # Use the hybrid parser microservice for PDFs (structure-aware blocks).
 USE_PARSER_SERVICE = os.getenv("USE_PARSER_SERVICE", "true").lower() == "true"
@@ -172,18 +173,32 @@ class IngestionService:
                 os.remove(temp_path)
             raise e
 
+    async def _update_job(self, job_id: str, **fields) -> None:
+        """Best-effort progress update — a Redis hiccup here must never fail ingestion."""
+        if not job_id:
+            return
+        try:
+            await IngestionJobService.update_job(job_id, **fields)
+        except Exception as e:
+            logger.warning(f"   (progress update failed, ignoring: {e})")
+
     async def process_upload_from_path(
         self,
         file_path: str,
         filename: str,
         document_type: str = "Auto (Detect)",
-        user_id: str = None
+        user_id: str = None,
+        job_id: str = None,
     ) -> dict:
         """
         Processes an already-saved file at file_path.
         Called by the background job task — the UploadFile is no longer available.
         Same pipeline as process_upload but accepts a path instead of UploadFile.
         Returns: {"status", "file_id", "filename", "strategy", "chunks_count"}
+
+        job_id, if given, gets its progress_message updated live as each stage
+        actually starts/finishes — so the status the frontend shows reflects
+        which parser really ran, instead of a fixed guess made before routing.
         """
         import uuid as uuid_mod
         from langchain_core.documents import Document as LCDoc
@@ -205,6 +220,7 @@ class IngestionService:
             # ── Structure-aware path: PDFs go to the parser microservice, which
             # returns typed blocks; we chunk on structure (headings/callouts).
             if USE_PARSER_SERVICE and filename.lower().endswith(".pdf"):
+                await self._update_job(job_id, progress_message="Parsing with custom layout parser...")
                 try:
                     chunks_count = await self._ingest_pdf_blocks(
                         file_path, filename, file_id, user_id, route_config
@@ -220,10 +236,15 @@ class IngestionService:
                     }
                 except ParserServiceError as e:
                     logger.warning(f"   ⚠️ Parser service unavailable ({e}); falling back to LlamaParse")
+                    await self._update_job(
+                        job_id,
+                        progress_message="Custom parser unavailable, retrying with LlamaParse...",
+                    )
 
             # ── Native non-PDF path: docx/pptx/xlsx/csv/text → typed blocks → same
             # structure-aware pipeline as PDFs (routing/chunking/hybrid/rerank).
             elif os.path.splitext(filename)[1].lower() in NATIVE_SUPPORTED_EXTS:
+                await self._update_job(job_id, progress_message="Extracting document structure...")
                 nblocks = await asyncio.to_thread(native_blocks_from_file, file_path, filename)
                 if nblocks:
                     chunks_count = await self._ingest_blocks(
@@ -239,8 +260,13 @@ class IngestionService:
                         "chunks_count": chunks_count,
                     }
                 logger.warning(f"   ⚠️ Native extraction yielded no blocks for {filename}; falling back to LlamaParse")
+                await self._update_job(
+                    job_id,
+                    progress_message="No native structure found, retrying with LlamaParse...",
+                )
 
             # Parsing (fallback / unsupported)
+            await self._update_job(job_id, progress_message="Parsing document with LlamaParse...")
             docs = await self.parser.parse(file_path, route_config["parser_config"])
             logger.info(f"   ✅ Parsed {len(docs)} raw documents.")
 

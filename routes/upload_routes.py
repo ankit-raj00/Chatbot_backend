@@ -45,7 +45,7 @@ async def _run_ingestion_background(
         await IngestionJobService.update_job(
             job_id,
             status="parsing",
-            progress_message="Parsing document with LlamaParse..."
+            progress_message="Analyzing document...",
         )
 
         # Re-create an UploadFile-like object from the saved temp file
@@ -53,11 +53,15 @@ async def _run_ingestion_background(
         # We pass the temp path directly to the underlying processor
         ingestion_service = IngestionService()
 
+        # job_id lets the service push real per-stage progress_message updates
+        # (which parser actually ran, fallback reasons) instead of this initial
+        # generic placeholder staying on screen for the whole run.
         result = await ingestion_service.process_upload_from_path(
             file_path=temp_path,
             filename=original_filename,
             document_type=document_type,
             user_id=user_id,
+            job_id=job_id,
         )
 
         await IngestionJobService.update_job(
