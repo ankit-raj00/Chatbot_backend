@@ -40,7 +40,6 @@ from routes.skill_vault_routes import router as skill_vault_router
 from routes.agent_routes import router as agent_router
 from routes.output_routes import router as output_router
 from routes.parser_routes import router as parser_router
-from routes.parser_dashboard_routes import router as parser_dashboard_router
 
 from contextlib import asynccontextmanager
 
@@ -311,7 +310,6 @@ app.include_router(skill_vault_router)
 app.include_router(agent_router)
 app.include_router(output_router)
 app.include_router(parser_router)
-app.include_router(parser_dashboard_router)
 
 # Attach middlewares
 app.add_middleware(CorrelationIdMiddleware)
