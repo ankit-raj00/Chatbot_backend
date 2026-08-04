@@ -16,6 +16,7 @@ Flow:
 import json
 import logging
 import asyncio
+import uuid
 from datetime import datetime
 from bson import ObjectId
 
@@ -235,6 +236,11 @@ class ChatService:
                     "mcp_server_ids": mcp_server_ids,
                     "user_id":        user_id,
                     "model":          model,
+                    # Unique per TURN (unlike thread_id, which is the stable
+                    # conversation_id shared across many turns) — lets
+                    # agent_tool_node log an incremental, crash-durable trail
+                    # of this specific turn's tool calls as they happen.
+                    "turn_id":        str(uuid.uuid4()),
                 },
                 # Each tool-call round trip (agent_node -> agent_tool_node -> agent_node)
                 # costs 2 steps. The agent is explicitly instructed to chain many tool
@@ -266,14 +272,35 @@ class ChatService:
                 else:
                     timeline.append({"type": "text", "content": text})
 
-            def _tl_complete_tool(tool_name: str, result: str) -> None:
+            def _tl_complete_tool(tool_name: str, result: str, run_id: str = None) -> None:
+                # Match by run_id (unique per tool invocation) when available —
+                # matching by name alone picks the LAST "running" entry with
+                # that name via reverse scan, which silently mismatches when
+                # two calls to the SAME tool are in flight close together
+                # (e.g. two analyze_image calls): whichever finishes first
+                # gets paired with the wrong (most-recently-added) entry,
+                # permanently stranding another entry at status="running"
+                # forever — confirmed live (conversation 6a719b5fa11cf10ed1232e28,
+                # a trailing analyze_image entry stuck "running" even though the
+                # turn itself completed successfully with a 200 response).
+                if run_id:
+                    for entry in reversed(timeline):
+                        if entry.get("type") == "tool" and entry.get("run_id") == run_id:
+                            entry["result"] = result
+                            entry["status"] = "completed"
+                            return
                 for entry in reversed(timeline):
                     if entry.get("type") == "tool" and entry.get("name") == tool_name and entry.get("status") == "running":
                         entry["result"] = result
                         entry["status"] = "completed"
                         return
 
-            def _tl_add_exec_output(tool_name: str, line_data: dict) -> None:
+            def _tl_add_exec_output(tool_name: str, line_data: dict, run_id: str = None) -> None:
+                if run_id:
+                    for entry in reversed(timeline):
+                        if entry.get("type") == "tool" and entry.get("run_id") == run_id:
+                            entry.setdefault("exec_output", []).append(line_data)
+                            return
                 for entry in reversed(timeline):
                     if entry.get("type") == "tool" and entry.get("name") == tool_name and entry.get("status") == "running":
                         entry.setdefault("exec_output", []).append(line_data)
@@ -332,11 +359,12 @@ class ChatService:
                 # Tool usage events
                 elif event_type == "on_tool_start":
                     tool_name = event.get("name")
+                    tool_run_id = event.get("run_id")
                     tool_args = event.get("data", {}).get("input")
                     yield f"data: {json.dumps({'status': f'Using tool: {tool_name}'})}\n\n"
                     yield f"data: {json.dumps({'tool_call': {'name': tool_name, 'args': tool_args}})}\n\n"
-                    tool_steps.append({"name": tool_name, "args": tool_args, "status": "running"})
-                    timeline.append({"type": "tool", "name": tool_name, "args": tool_args, "status": "running"})
+                    tool_steps.append({"name": tool_name, "args": tool_args, "status": "running", "run_id": tool_run_id})
+                    timeline.append({"type": "tool", "name": tool_name, "args": tool_args, "status": "running", "run_id": tool_run_id})
 
                     if tool_name == "load_skill":
                         skill_name = (tool_args or {}).get("skill_name", "")
@@ -354,76 +382,58 @@ class ChatService:
 
                 elif event_type == "on_tool_end":
                     tool_name = event.get("name")
+                    tool_run_id = event.get("run_id")
                     output    = event.get("data", {}).get("output", "")
-                    _tl_complete_tool(tool_name, str(output))
+                    _tl_complete_tool(tool_name, str(output), tool_run_id)
                     yield f"data: {json.dumps({'tool_output': {'name': tool_name, 'result': str(output)}})}\n\n"
 
-                    # Intercept artifact creation
-                    if tool_name in ["write_to_file", "create_pdf", "create_docx", "create_pptx", "run_python"]:
-                        matched_args = {}
-                        for step in reversed(tool_steps):
-                            if step["name"] == tool_name and step["status"] == "running":
-                                step["result"] = str(output)
-                                step["status"] = "completed"
-                                matched_args = step.get("args", {})
-                                break
-                        
-                        # For run_python, parse file path from the output string
-                        if tool_name == "run_python":
-                            out_str = str(output)
-                            # Look for common file creation patterns in the output
-                            import re
-                            file_match = re.search(r'(?:saved?|created?|written?|output).*?[:\s]+([\w./\\-]+\.(?:pdf|docx|pptx|xlsx|csv|txt|html|png|jpg|md|json))', out_str, re.IGNORECASE)
-                            if file_match:
-                                file_path = file_match.group(1).strip()
-                                content = matched_args.get('code', '')
-                                
-                                # Try to read the actual file content if it's text-based
-                                if file_path.lower().endswith(('.md', '.txt', '.csv', '.json', '.html')):
-                                    try:
-                                        from utils.workspace import workspace_for
-                                        ws = workspace_for(user_id)
-                                        actual_file = ws / file_path
-                                        if actual_file.exists():
-                                            # sync file read — off the event loop
-                                            content = await asyncio.to_thread(
-                                                actual_file.read_text, encoding='utf-8'
-                                            )
-                                    except Exception:
-                                        pass
+                    # NOTE: a regex-based "artifact" interception used to live here for
+                    # write_to_file/create_pdf/create_docx/create_pptx/run_python. Removed:
+                    # it guessed a created file's path from the tool's TEXT OUTPUT via
+                    # regex, then set the artifact's displayed "content" to the PYTHON
+                    # SOURCE CODE that ran (matched_args.get('code', '')) — only reading
+                    # the real file back for a handful of text extensions. Binary outputs
+                    # (png/pdf/docx/...) got the raw script text as their "content", which
+                    # the frontend then tried to render as the file itself — a guaranteed
+                    # broken preview for every image an agent ever generated (confirmed
+                    # live: conversation 6a71912c70fdcde1c8c17aff, work/transformer_architecture.png
+                    # showed a broken image because "content" was the matplotlib script,
+                    # not image data). It also fired on work/ scratch files, which the
+                    # system prompt explicitly tells the agent are not user-facing —
+                    # conflicting with the correct, already-existing mechanism (Step 7's
+                    # _detect_created() below) that watches outputs/ specifically and
+                    # uploads real files to Cloudinary with a real, renderable URL.
+                    # Same run_id-first matching as _tl_complete_tool above — tool_steps
+                    # has the identical same-tool-name race risk.
+                    def _find_running_step(name: str, run_id: str):
+                        if run_id:
+                            for s in reversed(tool_steps):
+                                if s.get("run_id") == run_id:
+                                    return s
+                        for s in reversed(tool_steps):
+                            if s["name"] == name and s["status"] == "running":
+                                return s
+                        return None
 
-                                artifact_data = {'name': file_path, 'content': content, 'tool': tool_name}
-                                artifacts.append(artifact_data)
-                                timeline.append({"type": "artifact", **artifact_data})
-                                yield f"data: {json.dumps({'artifact_created': artifact_data})}\n\n"
-                        else:
-                            file_path = matched_args.get("file_path", "") or matched_args.get("target_file", "") or matched_args.get("output_path", "")
-                            file_content = matched_args.get("content", "") or matched_args.get("code", "")
-                            if "error" not in str(output).lower() and file_path:
-                                artifact_data = {'name': file_path, 'content': file_content, 'tool': tool_name}
-                                artifacts.append(artifact_data)
-                                timeline.append({"type": "artifact", **artifact_data})
-                                yield f"data: {json.dumps({'artifact_created': artifact_data})}\n\n"
-                    elif tool_name == "edit_file":
+                    if tool_name == "edit_file":
                         # Parse "Edited <path> (+N -M lines)" so the UI can show a
                         # compact diff pill instead of a wall of code — mirrors the
                         # run_python file-creation regex parsing above.
                         import re as _re
                         diff_match = _re.match(r"Edited (.+) \(\+(\d+) -(\d+) lines\)", str(output))
-                        for step in reversed(tool_steps):
-                            if step["name"] == tool_name and step["status"] == "running":
-                                step["result"] = str(output)
-                                step["status"] = "completed"
-                                if diff_match:
-                                    step["diff"] = {
-                                        "path": diff_match.group(1),
-                                        "added": int(diff_match.group(2)),
-                                        "removed": int(diff_match.group(3)),
-                                    }
-                                break
+                        step = _find_running_step(tool_name, tool_run_id)
+                        if step:
+                            step["result"] = str(output)
+                            step["status"] = "completed"
+                            if diff_match:
+                                step["diff"] = {
+                                    "path": diff_match.group(1),
+                                    "added": int(diff_match.group(2)),
+                                    "removed": int(diff_match.group(3)),
+                                }
                         if diff_match:
                             for entry in reversed(timeline):
-                                if entry.get("type") == "tool" and entry.get("name") == tool_name and entry.get("status") == "completed" and "diff" not in entry:
+                                if entry.get("type") == "tool" and entry.get("run_id") == tool_run_id and "diff" not in entry:
                                     entry["diff"] = {
                                         "path": diff_match.group(1),
                                         "added": int(diff_match.group(2)),
@@ -431,15 +441,14 @@ class ChatService:
                                     }
                                     break
                     else:
-                        for step in reversed(tool_steps):
-                            if step["name"] == tool_name and step["status"] == "running":
-                                step["result"] = str(output)
-                                step["status"] = "completed"
-                                break
+                        step = _find_running_step(tool_name, tool_run_id)
+                        if step:
+                            step["result"] = str(output)
+                            step["status"] = "completed"
 
                 elif event_type == "on_custom_event" and event.get("name") == "exec_output":
                     data = event.get("data", {})
-                    _tl_add_exec_output(data.get("tool", ""), data)
+                    _tl_add_exec_output(data.get("tool", ""), data, event.get("run_id"))
                     yield f"data: {json.dumps({'exec_output': data})}\n\n"
 
 

@@ -8,6 +8,7 @@ agent_node bound, via a lookup map rebuilt identically.
 import asyncio
 import inspect
 import json
+from datetime import datetime
 from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableConfig
 from graph.nodes.common import ChatState
@@ -21,7 +22,23 @@ from tools import AVAILABLE_TOOLS, get_tool
 from utils.mcp_connection_manager import mcp_manager
 from utils.hooks import run_pre_tool_hooks, run_post_tool_hooks, ToolTimer
 from utils.tool_result_cache import cached_invoke
+from utils.background_tasks import spawn
+from core.database import turn_steps_collection
+from config.model_config import ModelConfig
 from pathlib import Path
+import structlog
+
+DEFAULT_MODEL = ModelConfig.DEFAULT_MODEL
+
+logger = structlog.get_logger(__name__)
+
+
+async def _log_turn_step(payload: dict) -> None:
+    """Wraps the Motor insert in a real coroutine function — asyncio.create_task
+    (used by spawn()) requires an actual coroutine object, and calling a Motor
+    collection method directly can hand back a Future-like object instead,
+    which create_task rejects with TypeError."""
+    await turn_steps_collection.insert_one(payload)
 
 
 def _infer_project_type(cwd_path: Path) -> str:
@@ -62,6 +79,25 @@ _LOOP_NUDGE_THRESHOLD = 5
 # Count ALL calls to ANY tool in this combined set, regardless of which one,
 # and nudge once the total crosses the threshold.
 _LOOP_NUDGE_COMBINED_THRESHOLD = 8
+
+# Result-aware stuck detection: the guards above only look at how many times a
+# tool was CALLED. That misses the real signal — whether it's still returning
+# NEW information. Repeating the exact same (tool, args) and getting the exact
+# same result back, over and over, means zero new information is entering
+# context; that's a much stronger "genuinely stuck" signal than a raw call
+# count, and unlike the softer nudges above, this escalates hard immediately
+# rather than waiting for a fixed threshold turn.
+_STALE_RESULT_MAX = 2
+
+# Periodic LLM-judge progress check (every N total tool calls this turn,
+# across ALL tools) — a raw call-count threshold can't tell "genuinely
+# iterating on a real task" apart from "stuck repeating," so periodically ask
+# a cheap/fast model to look at the recent trajectory and classify it. This
+# mirrors the reflection/progress-check node pattern used in LangGraph's own
+# reference deep-research agent (an `evaluate_research`-style node reading
+# recent (tool, args, result) tuples and setting a continue/stop signal).
+_PROGRESS_CHECK_INTERVAL = 10
+_PROGRESS_CHECK_WINDOW = 10
 
 
 def _same_tool_call_count(messages, name: str) -> int:
@@ -104,6 +140,103 @@ def _identical_call_count(messages, name: str, raw_args: dict) -> int:
     return n
 
 
+def _total_tool_call_count(messages) -> int:
+    """How many tool calls of ANY kind appear in the current turn."""
+    n = 0
+    for m in messages:
+        n += len(getattr(m, "tool_calls", None) or [])
+    return n
+
+
+def _prior_results_for_call(messages, name: str, raw_args: dict) -> list[str]:
+    """Content strings of every prior ToolMessage answering this exact
+    (name, args) call this turn — used to detect a call returning the exact
+    SAME result repeatedly (zero new information), not just being called
+    repeatedly with possibly-changing results."""
+    try:
+        target = json.dumps(raw_args or {}, sort_keys=True, default=str)
+    except Exception:
+        target = str(raw_args)
+    matching_ids = set()
+    for m in messages:
+        for tc in getattr(m, "tool_calls", None) or []:
+            if tc.get("name") != name:
+                continue
+            try:
+                if json.dumps(dict(tc.get("args") or {}), sort_keys=True, default=str) == target:
+                    matching_ids.add(tc.get("id"))
+            except Exception:
+                pass
+    if not matching_ids:
+        return []
+    out = []
+    for m in messages:
+        if isinstance(m, ToolMessage) and getattr(m, "tool_call_id", None) in matching_ids:
+            out.append(m.content if isinstance(m.content, str) else str(m.content))
+    return out
+
+
+def _recent_tool_trajectory(messages, window: int) -> list[dict]:
+    """Compact (tool, args, result_snippet) view of the last `window` tool
+    calls this turn, in order — fed to the progress-check judge instead of
+    the full raw message history."""
+    calls_by_id = {}
+    order = []
+    for m in messages:
+        for tc in getattr(m, "tool_calls", None) or []:
+            cid = tc.get("id")
+            calls_by_id[cid] = {"tool": tc.get("name"), "args": tc.get("args"), "result": None}
+            order.append(cid)
+    for m in messages:
+        if isinstance(m, ToolMessage):
+            cid = getattr(m, "tool_call_id", None)
+            if cid in calls_by_id:
+                content = m.content if isinstance(m.content, str) else str(m.content)
+                calls_by_id[cid]["result"] = content[:300]
+    trajectory = [calls_by_id[cid] for cid in order if cid in calls_by_id]
+    return trajectory[-window:]
+
+
+async def _progress_check(trajectory: list[dict], model_name: str) -> dict:
+    """Ask a cheap/fast LLM call to classify the recent tool-call trajectory
+    as genuine progress vs. an unproductive loop. Mirrors the periodic
+    reflection/progress-check node pattern (e.g. LangGraph's own reference
+    deep-research agent's evaluate_research node) rather than relying purely
+    on a call-count threshold, which can't distinguish real iteration from
+    stuck repetition. Never raises — on any failure, assumes "progress" so
+    this safety net can't itself break a healthy turn."""
+    try:
+        from graph.llm_registry import get_llm
+        from langchain_core.messages import HumanMessage
+
+        steps_text = "\n".join(
+            f"{i+1}. {t['tool']}({json.dumps(t['args'], default=str)}) -> {t['result']}"
+            for i, t in enumerate(trajectory)
+        )
+        prompt = (
+            "You are monitoring an AI agent's recent tool-call trajectory inside a "
+            "single conversation turn. Decide if it is making genuine progress toward "
+            "answering the user, or stuck in an unproductive loop (repeating "
+            "essentially the same actions without new useful information).\n\n"
+            f"Recent tool calls (oldest first):\n{steps_text}\n\n"
+            'Respond with ONLY a compact JSON object: {"status": "progress" or "stuck", '
+            '"reason": "<one short sentence>"}. No other text.'
+        )
+        llm = get_llm(model_name)
+        resp = await llm.ainvoke([HumanMessage(content=prompt)])
+        text = resp.content if isinstance(resp.content, str) else str(resp.content)
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end == -1:
+            return {"status": "progress", "reason": "unparseable judge response"}
+        parsed = json.loads(text[start:end + 1])
+        if parsed.get("status") not in ("progress", "stuck"):
+            return {"status": "progress", "reason": "invalid judge status"}
+        return parsed
+    except Exception as e:
+        logger.warning("progress_check.failed", error=str(e))
+        return {"status": "progress", "reason": f"judge error: {e}"}
+
+
 async def _build_tool_map(state: ChatState, config: RunnableConfig) -> dict:
     """Rebuild the same tool list agent_node bound, keyed by tool.name."""
     configuration = config.get("configurable", {})
@@ -144,7 +277,10 @@ async def _build_tool_map(state: ChatState, config: RunnableConfig) -> dict:
 async def agent_tool_node(state: ChatState, config: RunnableConfig) -> dict:
     last_message = state["messages"][-1]
     tool_calls = getattr(last_message, "tool_calls", []) or []
-    user_id = config.get("configurable", {}).get("user_id", "")
+    configurable = config.get("configurable", {})
+    user_id = configurable.get("user_id", "")
+    turn_id = configurable.get("turn_id", "")
+    model_name = configurable.get("model") or DEFAULT_MODEL
 
     tool_map = await _build_tool_map(state, config)
 
@@ -253,9 +389,86 @@ async def agent_tool_node(state: ChatState, config: RunnableConfig) -> dict:
                             f"you found nothing, e.g. no matching documents in their knowledge base). "
                             f"Do not make another tool call before answering."
                         )
+
+            # Result-aware stuck detection: the exact same call returning the
+            # exact same result, repeatedly, means zero new information is
+            # entering context — escalate immediately regardless of the
+            # softer count-based nudges above.
+            if isinstance(tool_content, str):
+                prior_results = _prior_results_for_call(state["messages"], name, tool_call.get("args") or {})
+                stale = sum(1 for r in prior_results if r == tool_content)
+                if stale >= _STALE_RESULT_MAX:
+                    tool_content += (
+                        f"\n\n🛑 STUCK: this exact call has now returned the IDENTICAL result "
+                        f"{stale + 1} times — you are getting zero new information from repeating it. "
+                        f"Do not call '{name}' with these arguments again. Either try a genuinely "
+                        f"different approach, or give the user your final answer now, stating "
+                        f"plainly what you found and what you couldn't resolve."
+                    )
+
+            # Incremental crash-durability log — fire-and-forget so a hard
+            # server crash mid-turn loses at most the in-flight step, not the
+            # whole turn (previously NOTHING was persisted until the entire
+            # turn finished). TTL-expired (see main.py); the completed turn is
+            # still saved in full to messages_collection as before.
+            if turn_id:
+                spawn(
+                    _log_turn_step({
+                        "turn_id": turn_id,
+                        "conversation_id": configurable.get("thread_id", ""),
+                        "user_id": user_id,
+                        "step_index": _total_tool_call_count(state["messages"]),
+                        "tool": name,
+                        "args": args,
+                        "status": "success",
+                        "result_preview": (tool_content[:500] if isinstance(tool_content, str) else "[multimodal]"),
+                        "created_at": datetime.utcnow(),
+                    }),
+                    name="turn_step_log",
+                )
+
             return ToolMessage(content=tool_content, name=name, tool_call_id=call_id, status="success")
         except Exception as e:
+            if turn_id:
+                spawn(
+                    _log_turn_step({
+                        "turn_id": turn_id,
+                        "conversation_id": configurable.get("thread_id", ""),
+                        "user_id": user_id,
+                        "step_index": _total_tool_call_count(state["messages"]),
+                        "tool": name,
+                        "args": args,
+                        "status": "error",
+                        "result_preview": str(e)[:500],
+                        "created_at": datetime.utcnow(),
+                    }),
+                    name="turn_step_log",
+                )
             return ToolMessage(content=f"Error executing {name}: {e}", name=name, tool_call_id=call_id, status="error")
 
     results = await asyncio.gather(*[_execute(tc) for tc in tool_calls])
+
+    # Periodic LLM-judge progress check — every _PROGRESS_CHECK_INTERVAL total
+    # tool calls this turn (across ALL tools), ask a cheap model to classify
+    # the recent trajectory as progress vs. stuck, rather than relying purely
+    # on the count-based guards above (which can't tell real iteration apart
+    # from unproductive repetition). Only fires periodically, so it adds one
+    # extra small-model call every ~10 tool rounds, not per call.
+    total_calls = _total_tool_call_count(state["messages"])
+    if total_calls > 0 and total_calls % _PROGRESS_CHECK_INTERVAL == 0:
+        trajectory = _recent_tool_trajectory(state["messages"] + results, _PROGRESS_CHECK_WINDOW)
+        verdict = await _progress_check(trajectory, model_name)
+        if verdict.get("status") == "stuck":
+            directive = (
+                f"\n\n🛑 PROGRESS CHECK: after {total_calls} tool calls this turn, an automated review "
+                f"judged this trajectory as STUCK — {verdict.get('reason', 'no new progress detected')}. "
+                f"STOP making tool calls. Give the user your best final answer right now based on what "
+                f"you've already found, and clearly state what you were unable to resolve."
+            )
+            results = [
+                ToolMessage(content=(r.content + directive) if isinstance(r.content, str) else r.content,
+                            name=r.name, tool_call_id=r.tool_call_id, status=r.status)
+                for r in results
+            ]
+
     return {"messages": list(results)}

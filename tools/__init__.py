@@ -13,6 +13,7 @@ from tools.utilities.get_weather import get_weather
 from tools.utilities.read_mcp_resource import read_mcp_resource
 from rag.tools.retrieval_tool import search_knowledge_base
 from rag.tools.doc_store_tools import read_document_page
+from tools.utilities.web_search_tool import internet_search
 
 # NOTE: `execute_code` is intentionally NOT registered. It ran user code in the
 # SERVER interpreter + a shared anonymous workspace and pip-installed into the
@@ -29,6 +30,7 @@ AVAILABLE_TOOLS: Dict[str, Any] = {
     "read_mcp_resource": read_mcp_resource,
     "search_knowledge_base": search_knowledge_base,
     "read_document_page": read_document_page,
+    "internet_search": internet_search,
 }
 
 # Metadata Registry to support legacy Controller fields
@@ -41,6 +43,7 @@ TOOL_METADATA = {
     "read_mcp_resource": {"category": "utilities", "requires_auth": False},
     "search_knowledge_base": {"category": "rag", "requires_auth": False},
     "read_document_page": {"category": "rag", "requires_auth": False},
+    "internet_search": {"category": "utilities", "requires_auth": False},
 }
 
 def get_tool(tool_name: str) -> Optional[Any]:

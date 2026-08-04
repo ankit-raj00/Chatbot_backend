@@ -67,7 +67,8 @@ async def lifespan(app: FastAPI):
         """Create MongoDB indexes for query performance."""
         from core.database import (
             messages_collection, conversations_collection,
-            users_collection, mcp_servers_collection, mcp_oauth_tokens_collection
+            users_collection, mcp_servers_collection, mcp_oauth_tokens_collection,
+            turn_steps_collection
         )
         # messages: fetch by conversation_id + user_id (most common query)
         await messages_collection.create_index(
@@ -85,6 +86,12 @@ async def lifespan(app: FastAPI):
         await mcp_oauth_tokens_collection.create_index(
             [("user_id", 1), ("server_id", 1)], unique=True
         )
+        # turn_steps: incremental crash-durability log (agent_tool_node.py) —
+        # fetch by turn, and auto-expire so this never grows unboundedly (it's
+        # a durability trail for in-flight turns, not permanent history — the
+        # completed turn is already saved in full to messages_collection).
+        await turn_steps_collection.create_index([("turn_id", 1), ("step_index", 1)])
+        await turn_steps_collection.create_index("created_at", expireAfterSeconds=48 * 3600)
 
     try:
         await ensure_indexes()
