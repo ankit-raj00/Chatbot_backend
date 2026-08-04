@@ -49,12 +49,23 @@ class ChatController:
             yield f"data: {json.dumps({'error': 'Selected model does not support files'})}\n\n"
             return
 
+        # Resolve the conversation BEFORE touching the sandbox — uploads/outputs
+        # are scoped per conversation_id (see utils.workspace.conversation_workspace_for),
+        # so we need the real id (not None-meaning-"new") before we can save an
+        # uploaded file to the right place. ChatService.stream() would normally
+        # create this on a brand-new conversation, but that happens too late for
+        # uploads; calling the same idempotent helper here first is harmless —
+        # stream()'s own call just becomes an updated_at touch on an existing id.
+        conversation_id = await ChatService._ensure_conversation(
+            conversation_id, user_id, message, mcp_server_ids
+        )
+
         # Process file uploads (sandbox + Cloudinary)
         attachments = []
         files_content_parts = []
 
         if files:
-            files_content_parts, attachments = await self._process_uploads(user_id, files)
+            files_content_parts, attachments = await self._process_uploads(user_id, conversation_id, files)
 
         # Re-hydrate any previously-generated outputs that aren't on local disk
         # (e.g. evicted by cleanup, or gone after a restart). Fire-and-forget +
@@ -62,7 +73,7 @@ class ChatController:
         # workspace is a cache; Cloudinary is the durable source of truth.
         from utils.background_tasks import spawn
         from utils.output_store import restore_outputs_background
-        spawn(restore_outputs_background(user_id), name="restore_outputs")
+        spawn(restore_outputs_background(user_id, conversation_id), name="restore_outputs")
 
         # Delegate all streaming logic to ChatService
         async for chunk in ChatService.stream(
@@ -78,12 +89,12 @@ class ChatController:
         ):
             yield chunk
 
-    def _save_to_sandbox(self, user_id: str, filename: str, content: bytes) -> str:
-        """Copy uploaded file into the user's sandbox uploads/ dir.
+    def _save_to_sandbox(self, user_id: str, conversation_id: str, filename: str, content: bytes) -> str:
+        """Copy uploaded file into this conversation's sandbox uploads/ dir.
         Returns the path relative to the sandbox root (e.g. 'uploads/report.zip')."""
-        from utils.workspace import workspace_for
-        
-        uploads_dir = workspace_for(user_id) / "uploads"
+        from utils.workspace import conversation_workspace_for
+
+        uploads_dir = conversation_workspace_for(user_id, conversation_id) / "uploads"
         uploads_dir.mkdir(parents=True, exist_ok=True)
 
         dest = uploads_dir / filename
@@ -97,7 +108,7 @@ class ChatController:
         dest.write_bytes(content)
         return f"uploads/{dest.name}"
 
-    async def _process_uploads(self, user_id: str, files: list) -> tuple[list[dict], list[dict]]:
+    async def _process_uploads(self, user_id: str, conversation_id: str, files: list) -> tuple[list[dict], list[dict]]:
         """Save uploads to the sandbox and Cloudinary. Returns (content_parts, attachments).
 
         content_parts stays empty: the agent SEES images via the analyze_image
@@ -128,7 +139,7 @@ class ChatController:
                     tmp.write(content)
                     tmp_path = tmp.name
 
-                sandbox_path = self._save_to_sandbox(user_id, file_obj.filename, content)
+                sandbox_path = self._save_to_sandbox(user_id, conversation_id, file_obj.filename, content)
 
                 cloudinary_url, public_id = None, None
                 try:

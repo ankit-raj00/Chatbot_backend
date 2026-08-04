@@ -627,7 +627,7 @@ class TestE8ShellSandbox:
     async def test_e8_13_run_shell_tool_blocks_sandbox_escape(self):
         """The actual agent-facing tool also blocks path-escape attempts (cd .., ~)."""
         from tools.utilities.run_shell import make_run_shell_tool
-        tool = make_run_shell_tool("e2e_shell_sandbox_user")
+        tool = make_run_shell_tool("e2e_shell_sandbox_user", "e2e_shell_sandbox_conv")
         for cmd in ("cd ..; ls", "cd ~/.ssh", "cat ../../etc/passwd"):
             out = await tool.ainvoke({"command": cmd})
             assert "BLOCKED" in out, f"{cmd!r} should be blocked, got {out[:80]!r}"

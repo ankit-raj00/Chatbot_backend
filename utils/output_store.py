@@ -16,24 +16,24 @@ Restore is LAZY and NON-BLOCKING:
 import asyncio
 import structlog
 
-from utils.workspace import workspace_for
+from utils.workspace import conversation_workspace_for
 from utils.cloudinary_handler import CloudinaryHandler
 
 logger = structlog.get_logger(__name__)
 
 
-async def ensure_output_local(user_id: str, filename: str) -> bool:
+async def ensure_output_local(user_id: str, conversation_id: str, filename: str) -> bool:
     """Ensure a single tracked output exists locally, fetching from Cloudinary if
     missing. Returns True if the file is present locally afterwards."""
     from core.database import user_outputs_collection
 
-    outputs_dir = workspace_for(user_id) / "outputs"
+    outputs_dir = conversation_workspace_for(user_id, conversation_id) / "outputs"
     local_path = outputs_dir / filename
     if local_path.exists():
         return True
 
     doc = await user_outputs_collection.find_one(
-        {"user_id": user_id, "filename": filename}, {"cloudinary_url": 1}
+        {"user_id": user_id, "conversation_id": conversation_id, "filename": filename}, {"cloudinary_url": 1}
     )
     url = doc.get("cloudinary_url") if doc else None
     if not url:
@@ -46,15 +46,15 @@ async def ensure_output_local(user_id: str, filename: str) -> bool:
         return False
 
 
-async def restore_outputs_background(user_id: str) -> None:
-    """Restore ALL missing tracked outputs for a user, in PARALLEL.
+async def restore_outputs_background(user_id: str, conversation_id: str) -> None:
+    """Restore ALL missing tracked outputs for THIS conversation, in PARALLEL.
 
     Non-blocking by contract: schedule via utils.background_tasks.spawn so the
     chat response is never delayed. Files already on disk are skipped.
     """
     from core.database import user_outputs_collection
 
-    outputs_dir = workspace_for(user_id) / "outputs"
+    outputs_dir = conversation_workspace_for(user_id, conversation_id) / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
     handler = CloudinaryHandler()
 
@@ -70,7 +70,7 @@ async def restore_outputs_background(user_id: str) -> None:
             logger.warning("output_restore.failed", filename=filename, error=str(e))
 
     cursor = user_outputs_collection.find(
-        {"user_id": user_id}, {"filename": 1, "cloudinary_url": 1}
+        {"user_id": user_id, "conversation_id": conversation_id}, {"filename": 1, "cloudinary_url": 1}
     )
     tasks = [
         _one(doc.get("filename"), doc.get("cloudinary_url"))
@@ -78,4 +78,4 @@ async def restore_outputs_background(user_id: str) -> None:
     ]
     if tasks:
         await asyncio.gather(*tasks)
-        logger.info("output_restore.done", user_id=user_id, count=len(tasks))
+        logger.info("output_restore.done", user_id=user_id, conversation_id=conversation_id, count=len(tasks))

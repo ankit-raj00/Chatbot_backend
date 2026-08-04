@@ -198,10 +198,10 @@ async def agent_node(state: ChatState, config: RunnableConfig) -> dict:
     tools = []
 
     # 1. Always-on sandbox tools (the core of "free will")
-    tools.append(make_run_python_tool(user_id))
-    tools.append(make_run_shell_tool(user_id))
-    tools.append(make_edit_file_tool(user_id))
-    tools.append(make_analyze_image_tool(user_id))
+    tools.append(make_run_python_tool(user_id, conversation_id))
+    tools.append(make_run_shell_tool(user_id, conversation_id))
+    tools.append(make_edit_file_tool(user_id, conversation_id))
+    tools.append(make_analyze_image_tool(user_id, conversation_id))
     tools.append(make_read_file_natively_tool(user_id, conversation_id))
 
     # 2. Skill tools (always on — cheap, and the agent needs to discover them)
@@ -235,7 +235,7 @@ async def agent_node(state: ChatState, config: RunnableConfig) -> dict:
     #    directly targets the observed failure mode where an agent resuming a
     #    task (or losing track mid-turn) burned dozens of calls rediscovering
     #    file state it could have been simply told.
-    messages = _inject_workspace_snapshot(messages, user_id)
+    messages = _inject_workspace_snapshot(messages, user_id, conversation_id)
 
     # ── Trim to a bounded window so long histories / long ReAct turns can't
     #    blow the context. Always keep the system message + most recent turns ──
@@ -283,13 +283,17 @@ _SNAPSHOT_START = "<<<WORKSPACE_SNAPSHOT>>>"
 _SNAPSHOT_END = "<<<END_WORKSPACE_SNAPSHOT>>>"
 
 
-def _workspace_snapshot(user_id: str) -> str:
+def _workspace_snapshot(user_id: str, conversation_id: str) -> str:
     """Fast filesystem scan of uploads/work/outputs — ground truth on what
     actually exists, computed fresh (no caching, no staleness risk) every
     time this is called. Deliberately cheap: no file content is read, only
-    names/sizes/mtimes, so this is safe to run on every single LLM call."""
-    from utils.workspace import workspace_for
-    ws = workspace_for(user_id)
+    names/sizes/mtimes, so this is safe to run on every single LLM call.
+
+    Scoped to THIS conversation's own uploads/work/outputs (not the whole
+    user) — otherwise the agent would see, and could get confused by, files
+    belonging to the user's OTHER conversations."""
+    from utils.workspace import conversation_workspace_for
+    ws = conversation_workspace_for(user_id, conversation_id)
     lines = []
     for sub in ("uploads", "work", "outputs"):
         d = ws / sub
@@ -307,13 +311,13 @@ def _workspace_snapshot(user_id: str) -> str:
     return "\n".join(lines)
 
 
-def _inject_workspace_snapshot(messages: list, user_id: str) -> list:
+def _inject_workspace_snapshot(messages: list, user_id: str, conversation_id: str) -> list:
     """Replace (or add) the workspace-snapshot block in the leading
     SystemMessage with a freshly-computed one. Uses delimiter markers so this
     can safely re-run on every agent_node call within a turn without
     duplicating or stacking stale copies."""
     try:
-        snapshot = _workspace_snapshot(user_id)
+        snapshot = _workspace_snapshot(user_id, conversation_id)
     except Exception:
         return messages  # never let a filesystem hiccup break a turn
     block = f"{_SNAPSHOT_START}\n## Current workspace snapshot (auto-generated — trust it, don't re-check with ls/find)\n{snapshot}\n{_SNAPSHOT_END}"

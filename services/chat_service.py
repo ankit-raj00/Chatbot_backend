@@ -74,10 +74,15 @@ class ChatService:
             return [], []
 
     @staticmethod
-    async def _bg_upload_to_cloudinary(file_path_str: str, filename: str, user_id: str):
+    async def _bg_upload_to_cloudinary(file_path_str: str, filename: str, user_id: str, conversation_id: str):
         """Persist a generated file to Cloudinary (the durable source of truth) and
         index it in MongoDB. Retries a few times before giving up, because this is
         what makes an output recoverable after a local cache eviction / restart.
+
+        Keyed by (user_id, conversation_id, filename) — NOT just (user_id,
+        filename) — so two conversations that happen to generate a
+        same-named file (e.g. two unrelated "report.pdf") don't upsert over
+        each other's durable Cloudinary record.
         """
         from utils.cloudinary_handler import CloudinaryHandler
         from core.database import user_outputs_collection
@@ -88,10 +93,10 @@ class ChatService:
         for attempt in range(1, 4):
             try:
                 url, public_id = await handler.upload_file(
-                    file_path_str, folder=f"chatbot/outputs/{user_id}"
+                    file_path_str, folder=f"chatbot/outputs/{user_id}/{conversation_id}"
                 )
                 await user_outputs_collection.update_one(
-                    {"user_id": user_id, "filename": filename},
+                    {"user_id": user_id, "conversation_id": conversation_id, "filename": filename},
                     {"$set": {
                         "cloudinary_url": url,
                         "public_id": public_id,
@@ -99,14 +104,14 @@ class ChatService:
                     }},
                     upsert=True,
                 )
-                logger.info("output.persisted", filename=filename, user_id=user_id, attempt=attempt)
+                logger.info("output.persisted", filename=filename, user_id=user_id, conversation_id=conversation_id, attempt=attempt)
                 return
             except Exception as e:
                 last_err = e
                 await asyncio.sleep(1.5 * attempt)
         # All retries failed — this output now exists ONLY on local disk (at risk).
         logger.error(
-            "output.persist_failed", filename=filename, user_id=user_id, error=str(last_err)
+            "output.persist_failed", filename=filename, user_id=user_id, conversation_id=conversation_id, error=str(last_err)
         )
 
     @staticmethod
@@ -315,10 +320,15 @@ class ChatService:
             agent_graph = await get_agent_graph()
 
             # Snapshot existing files BEFORE agent runs — name -> mtime, so we catch
-            # both brand-new files AND overwritten files (same name, updated content)
-            from utils.workspace import workspace_for as _ws_for
+            # both brand-new files AND overwritten files (same name, updated content).
+            # Scoped to THIS conversation's own outputs/ dir (not the whole user) —
+            # see utils.workspace.conversation_workspace_for for why: a shared
+            # per-user outputs/ dir let one conversation's file write land inside
+            # another concurrent conversation's snapshot window and get attached
+            # to the wrong reply (confirmed live in prod).
+            from utils.workspace import conversation_workspace_for as _conv_ws_for
             _CREATED_EXT = {".pdf", ".docx", ".pptx", ".xlsx", ".csv", ".txt", ".html", ".png", ".jpg", ".svg", ".md", ".json"}
-            _outputs_dir = _ws_for(user_id) / "outputs"
+            _outputs_dir = _conv_ws_for(user_id, conversation_id) / "outputs"
             _outputs_dir.mkdir(parents=True, exist_ok=True)
 
             def _snapshot_outputs() -> dict:
@@ -501,7 +511,7 @@ class ChatService:
                             out.append({
                                 "name":         f.name,
                                 "size_bytes":   f.stat().st_size,
-                                "download_url": f"/outputs/my/{f.name}",
+                                "download_url": f"/outputs/my/{conversation_id}/{f.name}",
                                 "ext":          f.suffix.lower().lstrip("."),
                                 "_path":        str(f),
                             })
@@ -511,7 +521,7 @@ class ChatService:
                 detected = await asyncio.to_thread(_detect_created)
                 for item in detected:
                     # Persist to Cloudinary (durable store) — tracked bg task.
-                    spawn(cls._bg_upload_to_cloudinary(item.pop("_path"), item["name"], user_id),
+                    spawn(cls._bg_upload_to_cloudinary(item.pop("_path"), item["name"], user_id, conversation_id),
                           name="cloudinary_upload")
                     created_files.append(item)
                 if created_files:

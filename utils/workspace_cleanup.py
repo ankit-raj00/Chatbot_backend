@@ -66,24 +66,30 @@ async def _cleanup():
         last_active = _read_last_active(user_dir)
         idle_hours = (now - last_active) / 3600 if last_active else 999999
 
+        # "files" targets: uploads/outputs/work now live per-conversation
+        # (see utils.workspace.conversation_workspace_for), nested under
+        # <user>/conversations/<conversation_id>/. Old flat <user>/outputs/
+        # etc. can still exist for files created before that migration, so
+        # both layouts are swept. "tree" targets (.venv, caches) stay at the
+        # user root — those are still legitimately shared across conversations.
+        file_targets = []
         for dirname, max_age_h, mode in CLEANUP_POLICY:
-            target = user_dir / dirname
-            if not target.exists():
+            if mode != "files":
                 continue
+            legacy = user_dir / dirname
+            if legacy.exists():
+                file_targets.append((legacy, max_age_h))
+            conversations_root = user_dir / "conversations"
+            if conversations_root.exists():
+                for conv_dir in conversations_root.iterdir():
+                    target = conv_dir / dirname
+                    if target.exists():
+                        file_targets.append((target, max_age_h))
 
-            if mode == "tree":
-                if idle_hours >= max_age_h:
-                    try:
-                        import shutil as _sh
-                        _sh.rmtree(target)
-                        logger.info(f"workspace_cleanup.tree_removed user={user_dir.name} dir={dirname} idle_h={idle_hours:.1f}")
-                    except Exception as e:
-                        logger.warning(f"workspace_cleanup.tree_remove_failed dir={target} error={e}")
-            else:  # "files"
-                # Gate on workspace idleness: don't evict files from a workspace
-                # that's still in active use, even if individual files are old.
-                if idle_hours < FILES_IDLE_GRACE_HOURS:
-                    continue
+        # Gate on workspace idleness: don't evict files from a workspace
+        # that's still in active use, even if individual files are old.
+        if idle_hours >= FILES_IDLE_GRACE_HOURS:
+            for target, max_age_h in file_targets:
                 cutoff = now - max_age_h * 3600
                 for fp in target.rglob("*"):
                     if fp.is_file() and fp.stat().st_mtime < cutoff:
@@ -91,6 +97,20 @@ async def _cleanup():
                             fp.unlink()
                         except Exception:
                             pass
+
+        for dirname, max_age_h, mode in CLEANUP_POLICY:
+            if mode != "tree":
+                continue
+            target = user_dir / dirname
+            if not target.exists():
+                continue
+            if idle_hours >= max_age_h:
+                try:
+                    import shutil as _sh
+                    _sh.rmtree(target)
+                    logger.info(f"workspace_cleanup.tree_removed user={user_dir.name} dir={dirname} idle_h={idle_hours:.1f}")
+                except Exception as e:
+                    logger.warning(f"workspace_cleanup.tree_remove_failed dir={target} error={e}")
 
 
 async def run_cleanup_loop():

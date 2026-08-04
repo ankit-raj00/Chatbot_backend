@@ -12,7 +12,7 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 from langchain_core.callbacks import adispatch_custom_event
-from utils.workspace import workspace_for, venv_python_for, pip_cache_dir_for, is_path_within_sandbox
+from utils.workspace import conversation_workspace_for, venv_python_for, pip_cache_dir_for, is_path_within_conversation_sandbox
 from utils.code_executor import stream_python, sandbox_env
 
 _TIMEOUT = 300  # seconds
@@ -57,7 +57,7 @@ async def _auto_install_and_retry_streaming(code: str, error: str, cwd: str, use
     return "\n".join(lines) or "(no output)"
 
 
-def make_run_python_tool(user_id: str):
+def make_run_python_tool(user_id: str, conversation_id: str):
     """
     Factory: returns a run_python tool bound to a specific user's workspace.
 
@@ -65,7 +65,7 @@ def make_run_python_tool(user_id: str):
     tool call and run in a thread, so building the graph / tool list never blocks
     the event loop.
     """
-    cwd = str(workspace_for(user_id))
+    cwd = str(conversation_workspace_for(user_id, conversation_id))
 
     @tool
     async def run_python(code: str, filename: str = "") -> str:
@@ -102,7 +102,7 @@ def make_run_python_tool(user_id: str):
 
         script_path = None
         if filename:
-            if not is_path_within_sandbox(user_id, filename):
+            if not is_path_within_conversation_sandbox(user_id, conversation_id, filename):
                 return "BLOCKED: filename path outside sandbox"
             script_path = str(Path(cwd) / filename)
 

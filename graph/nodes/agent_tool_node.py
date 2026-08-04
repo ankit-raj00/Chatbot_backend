@@ -274,8 +274,8 @@ async def _build_tool_map(state: ChatState, config: RunnableConfig) -> dict:
     tool_map = {}
 
     # Always-on sandbox tools — must exactly mirror agent_node.py's tool list
-    for t in (make_run_python_tool(user_id), make_run_shell_tool(user_id),
-              make_edit_file_tool(user_id), make_analyze_image_tool(user_id),
+    for t in (make_run_python_tool(user_id, conversation_id), make_run_shell_tool(user_id, conversation_id),
+              make_edit_file_tool(user_id, conversation_id), make_analyze_image_tool(user_id, conversation_id),
               list_skills, make_load_skill_tool(user_id)):
         tool_map[t.name] = (t, {"user_id": user_id, "selected_files": selected_files})
 

@@ -16,15 +16,48 @@ from core.middleware import get_current_user
 
 router = APIRouter(prefix="/outputs", tags=["Outputs"])
 
-from utils.workspace import workspace_for, WORKSPACE_ROOT as OUTPUTS_DIR
+from utils.workspace import workspace_for, conversation_workspace_for, WORKSPACE_ROOT as OUTPUTS_DIR
 
 ALLOWED_EXT = {".pdf", ".docx", ".pptx", ".xlsx", ".csv", ".txt", ".html", ".svg", ".png", ".jpg", ".md", ".json"}
 
 def _user_dir(user_id: str) -> Path:
-    # Outputs are in the outputs/ subfolder of the user's workspace
+    # LEGACY: outputs/ used to be flat, shared across all of a user's
+    # conversations. Kept around only so files created before the
+    # per-conversation migration (see conversation_workspace_for) still
+    # resolve. New files are written to _conversation_dir instead.
     p = workspace_for(user_id) / "outputs"
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _conversation_dir(user_id: str, conversation_id: str) -> Path:
+    p = conversation_workspace_for(user_id, conversation_id) / "outputs"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _find_legacy_by_filename(user_id: str, filename: str) -> Path | None:
+    """Best-effort fallback for callers that only have a filename, not a
+    conversation_id (old markdown links the agent wrote inline, or old
+    saved messages from before conversation-scoped URLs existed). Checks the
+    legacy flat dir first, then the most-recently-modified match across this
+    user's conversation folders. Ambiguous by construction if two
+    conversations independently created a same-named file — prefer the
+    conversation-scoped route (/outputs/my/{conversation_id}/{filename})
+    whenever a conversation_id is available."""
+    legacy = _user_dir(user_id) / filename
+    if legacy.exists():
+        return legacy
+
+    conv_root = workspace_for(user_id) / "conversations"
+    if not conv_root.exists():
+        return None
+    candidates = [
+        p for p in conv_root.glob(f"*/outputs/{filename}") if p.is_file()
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 async def _serve_cloudinary(cloudinary_url: str, filename: str) -> StreamingResponse:
@@ -126,25 +159,71 @@ async def list_my_outputs(current_user: dict = Depends(get_current_user)):
     return {"files": files}
 
 
+@router.get("/my/{conversation_id}/{filename}")
+async def download_my_conversation_output(
+    conversation_id: str,
+    filename: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Download a file generated in a specific conversation. This is the
+    unambiguous, correct URL — what newly-generated files_created entries
+    use — since two different conversations can independently create a
+    same-named file (e.g. two unrelated "report.pdf"), and only the
+    conversation_id disambiguates which one you mean.
+    """
+    user_id   = str(current_user["_id"])
+    file_path = _conversation_dir(user_id, conversation_id) / filename
+
+    if not file_path.exists():
+        from core.database import user_outputs_collection
+        output_doc = await user_outputs_collection.find_one(
+            {"user_id": user_id, "conversation_id": conversation_id, "filename": filename}
+        )
+        if output_doc and output_doc.get("cloudinary_url"):
+            return await _serve_cloudinary(output_doc["cloudinary_url"], filename)
+        raise HTTPException(status_code=404, detail=f"File '{filename}' not found.")
+
+    if file_path.suffix.lower() not in ALLOWED_EXT:
+        raise HTTPException(status_code=400, detail="File type not permitted")
+    try:
+        file_path.resolve().relative_to(OUTPUTS_DIR.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Invalid path")
+
+    return FileResponse(
+        path=str(file_path),
+        filename=filename,
+        content_disposition_type="inline"
+    )
+
+
 @router.get("/my/{filename}")
 async def download_my_output(
     filename: str,
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Download a file from the current user's workspace.
-    User identity comes from JWT — no user_id needed in URL.
-    This is the URL that LLM-generated download links should use.
-    Example: /api/outputs/my/Dogs_Report.pdf
+    LEGACY fallback: download a file by name alone, with no conversation_id.
+    Used only by (a) files created before the per-conversation migration and
+    (b) UI code paths that don't have a conversation_id handy (inline
+    markdown links the agent wrote, attachment-preview fallbacks). Ambiguous
+    if two conversations independently created a same-named file — picks the
+    most recently modified match. Prefer
+    /outputs/my/{conversation_id}/{filename} wherever a conversation_id is
+    available (that's what newly-generated files_created entries use).
     """
     user_id   = str(current_user["_id"])
-    file_path = _user_dir(user_id) / filename
+    file_path = _find_legacy_by_filename(user_id, filename)
 
-    if not file_path.exists():
+    if not file_path:
         # Local cache miss — stream from Cloudinary through the backend (same-origin
         # so browser preview works, not a cross-origin 302 that CORS blocks).
+        # No conversation_id to disambiguate — take the most recently updated match.
         from core.database import user_outputs_collection
-        output_doc = await user_outputs_collection.find_one({"user_id": user_id, "filename": filename})
+        output_doc = await user_outputs_collection.find_one(
+            {"user_id": user_id, "filename": filename}, sort=[("updated_at", -1)]
+        )
         if output_doc and output_doc.get("cloudinary_url"):
             return await _serve_cloudinary(output_doc["cloudinary_url"], filename)
         raise HTTPException(status_code=404, detail=f"File '{filename}' not found.")

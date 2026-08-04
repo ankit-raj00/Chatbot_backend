@@ -15,7 +15,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 @pytest.mark.parametrize("cmd", ["rm -rf /", "cd ..; ls", "cat ../../etc/passwd", "cd ~/.ssh", "ls .."])
 async def test_run_shell_blocks_dangerous_and_escapes(cmd):
     from tools.utilities.run_shell import make_run_shell_tool
-    tool = make_run_shell_tool("test_user_v3")
+    tool = make_run_shell_tool("test_user_v3", "test_conv_v3")
     out = await tool.ainvoke({"command": cmd})
     assert "BLOCKED" in out, f"{cmd!r} should be blocked, got {out[:80]!r}"
 
@@ -23,7 +23,7 @@ async def test_run_shell_blocks_dangerous_and_escapes(cmd):
 @pytest.mark.asyncio
 async def test_run_shell_allows_safe_command():
     from tools.utilities.run_shell import make_run_shell_tool
-    tool = make_run_shell_tool("test_user_v3")
+    tool = make_run_shell_tool("test_user_v3", "test_conv_v3")
     out = await tool.ainvoke({"command": "echo agentx_v3_ok"})
     assert "BLOCKED" not in out and "agentx_v3_ok" in out
 
