@@ -7,7 +7,7 @@ and per-user npm/pip environment scoping.
 import os
 from langchain_core.tools import tool
 from langchain_core.callbacks import adispatch_custom_event
-from utils.workspace import workspace_for, is_path_within_sandbox, pip_cache_dir_for, npm_prefix_for
+from utils.workspace import conversation_workspace_for, is_path_within_conversation_sandbox, pip_cache_dir_for, npm_prefix_for
 from utils.code_executor import stream_shell, sandbox_env
 
 BLOCKED_PATTERNS = [
@@ -17,8 +17,8 @@ BLOCKED_PATTERNS = [
 ]
 
 
-def make_run_shell_tool(user_id: str):
-    cwd = str(workspace_for(user_id))
+def make_run_shell_tool(user_id: str, conversation_id: str):
+    cwd = str(conversation_workspace_for(user_id, conversation_id))
 
     @tool
     async def run_shell(command: str) -> str:
@@ -61,7 +61,7 @@ def make_run_shell_tool(user_id: str):
             # Block home-dir / absolute escapes.
             if p.startswith("~"):
                 return "BLOCKED: home-directory ('~') access is not allowed"
-            if ("/" in p) and not is_path_within_sandbox(user_id, part):
+            if ("/" in p) and not is_path_within_conversation_sandbox(user_id, conversation_id, part):
                 return "BLOCKED: path outside sandbox"
             # Guard the `cd`/`pushd`/`chdir` target explicitly (it mutates cwd for
             # every following command in the same shell invocation).
@@ -70,7 +70,7 @@ def make_run_shell_tool(user_id: str):
                 tnorm = _norm(target)
                 if (tnorm == ".." or tnorm.startswith("../") or "/../" in tnorm
                         or tnorm.startswith("~")
-                        or not is_path_within_sandbox(user_id, target)):
+                        or not is_path_within_conversation_sandbox(user_id, conversation_id, target)):
                     return "BLOCKED: cannot change directory outside the sandbox"
 
         # Prepare isolated environment. SECURITY: build off sandbox_env()'s safe

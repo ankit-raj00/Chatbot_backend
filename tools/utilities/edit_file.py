@@ -14,7 +14,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from utils.workspace import workspace_for, is_path_within_sandbox
+from utils.workspace import conversation_workspace_for, is_path_within_conversation_sandbox
 
 
 def _count_diff_lines(old_text: str, new_text: str) -> tuple[int, int]:
@@ -31,8 +31,8 @@ def _count_diff_lines(old_text: str, new_text: str) -> tuple[int, int]:
     return added, removed
 
 
-def make_edit_file_tool(user_id: str):
-    ws_root = workspace_for(user_id)
+def make_edit_file_tool(user_id: str, conversation_id: str):
+    ws_root = conversation_workspace_for(user_id, conversation_id)
 
     class EditFileInput(BaseModel):
         path: str = Field(description="Sandbox-relative path to an existing file, e.g. 'work/notes.tex'")
@@ -60,7 +60,7 @@ def make_edit_file_tool(user_id: str):
             return "Error: old_string and new_string are identical — nothing to change."
 
         target = (ws_root / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
-        if not is_path_within_sandbox(user_id, path):
+        if not is_path_within_conversation_sandbox(user_id, conversation_id, path):
             return "BLOCKED: path outside sandbox"
         if not target.exists():
             return f"Error: file not found: {path}"

@@ -25,7 +25,7 @@ from langchain_core.tools import StructuredTool
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
-from utils.workspace import workspace_for, is_path_within_sandbox
+from utils.workspace import conversation_workspace_for, is_path_within_conversation_sandbox
 from config.model_config import ModelConfig
 
 # Long-edge cap — images larger than this are downscaled before the vision call
@@ -58,8 +58,8 @@ def _prepare_data_uri(raw: bytes, suffix: str) -> str:
     return f"data:{mime};base64,{b64}"
 
 
-def make_analyze_image_tool(user_id: str):
-    ws_root = workspace_for(user_id)
+def make_analyze_image_tool(user_id: str, conversation_id: str):
+    ws_root = conversation_workspace_for(user_id, conversation_id)
 
     _DEFAULT_QUERY = ("Describe this image in thorough detail: any text (quoted verbatim), "
                       "objects, people, layout, colors, and notable details.")
@@ -82,7 +82,7 @@ def make_analyze_image_tool(user_id: str):
 
         Returns a text description/answer, not the raw image.
         """
-        if not is_path_within_sandbox(user_id, sandbox_path):
+        if not is_path_within_conversation_sandbox(user_id, conversation_id, sandbox_path):
             return "BLOCKED: path outside sandbox"
 
         target = (ws_root / sandbox_path).resolve() if not Path(sandbox_path).is_absolute() else Path(sandbox_path).resolve()

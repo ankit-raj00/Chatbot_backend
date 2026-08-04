@@ -58,14 +58,21 @@ async def _run_agent(messages: list, user_id: str = "live_test_user_v3", **confi
     from config.model_config import ModelConfig
 
     graph = await get_agent_graph()
+    # conversation_id doubles as configurable.thread_id (what agent_node/
+    # agent_tool_node actually read to scope the sandbox — see
+    # utils.workspace.conversation_workspace_for) — a caller that needs to
+    # know it afterward (e.g. to check a created file's path) can pass it
+    # explicitly via conversation_id=...
+    conversation_id = config_overrides.pop("conversation_id", None) or str(uuid.uuid4())
     configurable = {
         "user_id": user_id,
         "model": ModelConfig.DEFAULT_MODEL,
         "enabled_tools": [],
+        "thread_id": conversation_id,
     }
     configurable.update(config_overrides)
     result = await graph.ainvoke(
-        {"messages": messages, "user_id": user_id, "conversation_id": str(uuid.uuid4()),
+        {"messages": messages, "user_id": user_id, "conversation_id": conversation_id,
          "enabled_tools": [], "mcp_server_urls": [], "selected_files": None},
         config={"configurable": configurable, "recursion_limit": 15},
     )
@@ -141,9 +148,10 @@ class TestIT05FullAgentRun:
         """Explicit instruction to use run_python must produce a tool call and a
         real file on disk in the user's sandbox (proves the sandbox tool actually
         executes through the live OmniRoute-backed agent)."""
-        from utils.workspace import workspace_for
+        from utils.workspace import workspace_for, conversation_workspace_for
 
         user_id = f"live_test_v3_{uuid.uuid4().hex[:8]}"
+        conversation_id = f"live_test_conv_{uuid.uuid4().hex[:8]}"
         try:
             result = await _run_agent(
                 [HumanMessage(content=(
@@ -151,12 +159,13 @@ class TestIT05FullAgentRun:
                     "into outputs/it06.txt, then print the path. Do it now."
                 ))],
                 user_id=user_id,
+                conversation_id=conversation_id,
             )
             tool_msgs = [m for m in result["messages"] if getattr(m, "name", None) == "run_python"]
             print(f"\n  -> run_python tool messages: {len(tool_msgs)}")
             assert tool_msgs, "Agent never called run_python"
 
-            out_file = workspace_for(user_id) / "outputs" / "it06.txt"
+            out_file = conversation_workspace_for(user_id, conversation_id) / "outputs" / "it06.txt"
             assert out_file.exists(), "run_python did not create the expected output file"
             assert "integration_test_ok" in out_file.read_text(encoding="utf-8")
         finally:
