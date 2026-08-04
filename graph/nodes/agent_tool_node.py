@@ -140,6 +140,31 @@ def _identical_call_count(messages, name: str, raw_args: dict) -> int:
     return n
 
 
+_SIMILAR_RESULT_PREFIX_LEN = 150
+_SIMILAR_RESULT_WINDOW = 6
+_SIMILAR_RESULT_MAX = 2
+
+
+def _recent_similar_result_count(messages, name: str, content: str) -> int:
+    """How many of the last _SIMILAR_RESULT_WINDOW ToolMessages for this SAME
+    tool NAME (regardless of args) have a result whose leading chars match
+    this one. Catches a pattern the exact-args stale check misses: re-reading
+    the same file via slightly different commands (different flags/line
+    ranges) that return overlapping content — proven live (conversation
+    6a71a1bfa11cf10ed1232e44): 6 separate run_shell calls with different args
+    all returned the same file's leading content, and none tripped the
+    exact-args stale check since the args genuinely differed each time."""
+    if not content or len(content) < 20:
+        return 0
+    prefix = content[:_SIMILAR_RESULT_PREFIX_LEN]
+    same_name_results = [
+        m.content for m in messages
+        if isinstance(m, ToolMessage) and m.name == name and isinstance(m.content, str)
+    ]
+    recent = same_name_results[-_SIMILAR_RESULT_WINDOW:]
+    return sum(1 for r in recent if r[:_SIMILAR_RESULT_PREFIX_LEN] == prefix)
+
+
 def _total_tool_call_count(messages) -> int:
     """How many tool calls of ANY kind appear in the current turn."""
     n = 0
@@ -304,6 +329,29 @@ async def agent_tool_node(state: ChatState, config: RunnableConfig) -> dict:
                 name=name, tool_call_id=call_id, status="error",
             )
 
+        # Hard block: list_skills has NO real parameters (confirmed schema:
+        # {"properties": {}}) — the "reason" text seen in logs is the model
+        # inventing an undeclared field, not a genuine argument. Because it's
+        # a different string every call, the args-based checks above never
+        # treat repeats as identical, even though the actual action (listing
+        # a static, unchanging skill catalog for this user) is 100% identical
+        # every time. There is never a legitimate reason to call it twice in
+        # one turn — block outright after the first, rather than relying on
+        # a nudge the model can (and, confirmed live, did) ignore.
+        if name == "list_skills":
+            prior_list_skills = _same_tool_call_count(state["messages"], "list_skills")
+            if prior_list_skills >= 1:
+                return ToolMessage(
+                    content=(
+                        "BLOCKED: you already called list_skills earlier this turn — it has no "
+                        "parameters and returns the exact same static skill catalog every time, so "
+                        "calling it again cannot give you new information. Use the skill list you "
+                        "already have: call load_skill(skill_name) directly for the one that applies, "
+                        "or if none apply, proceed without a skill manual."
+                    ),
+                    name=name, tool_call_id=call_id, status="error",
+                )
+
         entry = tool_map.get(name)
         if not entry:
             return ToolMessage(
@@ -405,6 +453,19 @@ async def agent_tool_node(state: ChatState, config: RunnableConfig) -> dict:
                         f"different approach, or give the user your final answer now, stating "
                         f"plainly what you found and what you couldn't resolve."
                     )
+                else:
+                    # Broader net: same TOOL (regardless of args) returning
+                    # overlapping content — e.g. re-reading the same file via
+                    # slightly different commands/flags. The exact-args check
+                    # above can't catch this since the args genuinely differ.
+                    similar = _recent_similar_result_count(state["messages"], name, tool_content)
+                    if similar >= _SIMILAR_RESULT_MAX:
+                        tool_content += (
+                            f"\n\n🛑 STUCK: your last {similar + 1} calls to '{name}' returned overlapping/"
+                            f"repeat content (even though the arguments differed each time) — you appear to "
+                            f"be re-reading something you already have. Stop re-reading it. Use what you "
+                            f"already learned, try a genuinely different action, or give your final answer now."
+                        )
 
             # Incremental crash-durability log — fire-and-forget so a hard
             # server crash mid-turn loses at most the in-flight step, not the
@@ -452,19 +513,47 @@ async def agent_tool_node(state: ChatState, config: RunnableConfig) -> dict:
     # tool calls this turn (across ALL tools), ask a cheap model to classify
     # the recent trajectory as progress vs. stuck, rather than relying purely
     # on the count-based guards above (which can't tell real iteration apart
-    # from unproductive repetition). Only fires periodically, so it adds one
-    # extra small-model call every ~10 tool rounds, not per call.
+    # from unproductive repetition).
+    #
+    # total_calls (state["messages"] already includes THIS round's triggering
+    # AIMessage.tool_calls) is the cumulative count AFTER this batch. Checking
+    # `total_calls % N == 0` is WRONG for parallel tool-calling: a round that
+    # dispatches, say, 8 calls at once can jump the cumulative total straight
+    # past a multiple of N (e.g. 55 -> 63, never landing on 60), silently
+    # skipping the check for that round and every one after it that doesn't
+    # happen to land exactly on a boundary either. Proven live: a 59-tool-call
+    # stuck-loop run never triggered this check even once, specifically
+    # because of this skip (conversation 6a71a1bfa11cf10ed1232e44). Fix:
+    # detect whether a multiple of N falls ANYWHERE in (before, after].
     total_calls = _total_tool_call_count(state["messages"])
-    if total_calls > 0 and total_calls % _PROGRESS_CHECK_INTERVAL == 0:
+    total_before = total_calls - len(tool_calls)
+    crossed_boundary = (total_before // _PROGRESS_CHECK_INTERVAL) != (total_calls // _PROGRESS_CHECK_INTERVAL)
+    if total_calls > 0 and crossed_boundary:
         trajectory = _recent_tool_trajectory(state["messages"] + results, _PROGRESS_CHECK_WINDOW)
         verdict = await _progress_check(trajectory, model_name)
         if verdict.get("status") == "stuck":
-            directive = (
-                f"\n\n🛑 PROGRESS CHECK: after {total_calls} tool calls this turn, an automated review "
-                f"judged this trajectory as STUCK — {verdict.get('reason', 'no new progress detected')}. "
-                f"STOP making tool calls. Give the user your best final answer right now based on what "
-                f"you've already found, and clearly state what you were unable to resolve."
+            # Escalate on a REPEAT stuck verdict this turn — a model that
+            # ignored the first soft nudge needs stronger, more absolute
+            # language, not the same wording again.
+            prior_stuck_checks = sum(
+                1 for m in state["messages"]
+                if isinstance(m, ToolMessage) and isinstance(m.content, str) and "PROGRESS CHECK" in m.content
             )
+            if prior_stuck_checks == 0:
+                directive = (
+                    f"\n\n🛑 PROGRESS CHECK: after {total_calls} tool calls this turn, an automated review "
+                    f"judged this trajectory as STUCK — {verdict.get('reason', 'no new progress detected')}. "
+                    f"STOP making tool calls. Give the user your best final answer right now based on what "
+                    f"you've already found, and clearly state what you were unable to resolve."
+                )
+            else:
+                directive = (
+                    f"\n\n🛑🛑 PROGRESS CHECK (repeat #{prior_stuck_checks + 1}): you were ALREADY told to stop "
+                    f"and answer, and made MORE tool calls instead — {verdict.get('reason', 'still no new progress')}. "
+                    f"This is your last warning before this turn is forcibly terminated. Do NOT call any more "
+                    f"tools. Respond with your final answer THIS TURN, stating plainly what you completed and "
+                    f"what you could not."
+                )
             results = [
                 ToolMessage(content=(r.content + directive) if isinstance(r.content, str) else r.content,
                             name=r.name, tool_call_id=r.tool_call_id, status=r.status)
