@@ -4,6 +4,35 @@
 > 
 > **New**: Dual-layer observability (LangSmith trace + native cost analytics), Admin Dashboard with real per-token cost tracking
 
+> ## ⚠️ Correction (2026-08-04) — parts of this document describe a decommissioned architecture
+> This is a large, detailed doc and a full rewrite risks introducing errors in sections that weren't
+> touched tonight — treat the below as authoritative corrections layered on top, not a claim that
+> everything else here is still accurate. For the current, actively-maintained source of truth on
+> architecture, see **`CLAUDE.md`** at the repo root; for the latest session's changes specifically,
+> see **`SESSION_HANDOFF.md`**.
+>
+> Specifically **stale** in the sections below:
+> - **Deployment target**: "designed to run on Render/Vercel" is out of date — the backend now runs
+>   on a self-hosted AWS EC2 box (Docker + nginx + Let's Encrypt), deployed manually via SSH
+>   (no CI/CD). See `SESSION_HANDOFF.md` for the exact deploy process.
+> - **The chat graph**: `native_tool_node` / `mcp_tool_node` as separate LangGraph nodes describes an
+>   earlier "supervisor + subgraphs" design. The current graph (`graph/builder.py`) is a **single
+>   two-node ReAct agent** (`agent_node` ↔ `agent_tool_node`) that handles native tools, MCP tools,
+>   and a sandboxed code-execution environment (`run_python`/`run_shell`/`edit_file`/`analyze_image`)
+>   itself, plus an on-demand "skills" system (markdown manuals loaded via `list_skills`/`load_skill`).
+>   None of that sandbox/skills system is documented anywhere in this file yet.
+> - **Model & pricing** (`Section 12`): `gemini-2.5-flash` at `$0.075`/`$0.30` per 1M tokens is the
+>   *previous* generation. The model is currently served through **OmniRoute** (an OpenAI-compatible
+>   LLM gateway) as `antigravity/gemini-3.5-flash-medium` — and that specific provider channel
+>   reports **$0.00 cost on every call** (verified empirically), since it's backed by pooled free
+>   Google accounts rather than a billed API key. `config/model_config.py`'s pricing constants are
+>   being updated to reflect Gemini 3.5 Flash's real published rate ($1.50/$9.00 per 1M tokens) for
+>   accounting purposes even though nothing is actually billed today — see `SESSION_HANDOFF.md` for
+>   the in-progress credit/cost-tracking system this feeds into.
+> - **Streaming architecture**: as of tonight, `ChatService.stream()` no longer directly drives the
+>   agent inline with the HTTP response — see `services/turn_manager.py` and `SESSION_HANDOFF.md`
+>   item #2. A page reload/disconnect no longer kills an in-progress generation.
+
 ---
 
 ## Table of Contents
