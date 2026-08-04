@@ -159,6 +159,22 @@ async def upload_file(
     }
 
 
+@router.get("/jobs")
+async def list_my_ingestion_jobs(
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    List this user's recent ingestion jobs (last 20, newest first), regardless
+    of whether the upload modal that started them is still open. Used to show
+    a persistent "what's happening with my uploads" status — the per-job
+    poll endpoint below requires already knowing a job_id, which the client
+    only has for as long as the modal that created it stays mounted.
+    """
+    user_id = str(current_user.get("_id"))
+    jobs = await IngestionJobService.list_jobs_for_user(user_id)
+    return {"jobs": jobs}
+
+
 @router.get("/job/{job_id}")
 async def get_ingestion_job_status(
     job_id: str,
