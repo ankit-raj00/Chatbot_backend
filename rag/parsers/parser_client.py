@@ -5,11 +5,14 @@ chunking, embedding and indexing stays here in the backend, so the parser
 never needs database credentials or tenancy logic.
 """
 import os
+import time
 import logging
 from typing import Any, Dict, Optional
 
 import httpx
 import structlog
+
+from services.parser_dashboard_service import ParserDashboardService
 
 logger = structlog.get_logger(__name__)
 
@@ -39,6 +42,8 @@ async def parse_pdf_blocks(
     with open(file_path, "rb") as fh:
         content = fh.read()
 
+    t0 = time.perf_counter()
+
     try:
         async with httpx.AsyncClient(timeout=timeout or PARSER_TIMEOUT) as client:
             resp = await client.post(
@@ -49,18 +54,41 @@ async def parse_pdf_blocks(
                 data={"mode": mode, "max_pages": str(max_pages), "include_b64": "false"},
             )
     except httpx.RequestError as e:
+        await ParserDashboardService.record_run(
+            filename=filename, source="rag_ingest", status="failed", mode=mode,
+            bytes_size=len(content), duration_ms=int((time.perf_counter() - t0) * 1000),
+            error=f"parser service unreachable: {e}",
+        )
         raise ParserServiceError(f"parser service unreachable: {e}") from e
 
     if resp.status_code != 200:
+        await ParserDashboardService.record_run(
+            filename=filename, source="rag_ingest", status="failed", mode=mode,
+            bytes_size=len(content), duration_ms=int((time.perf_counter() - t0) * 1000),
+            error=f"parser service {resp.status_code}: {resp.text[:300]}",
+        )
         raise ParserServiceError(f"parser service {resp.status_code}: {resp.text[:300]}")
 
     data = resp.json()
+    duration_ms = int((time.perf_counter() - t0) * 1000)
+    blocks = data.get("blocks") or []
     logger.info(
         "parser service ok",
         filename=filename,
         pages=data.get("pages"),
-        blocks=len(data.get("blocks") or []),
+        blocks=len(blocks),
         figures=len(data.get("images") or []),
+    )
+    # status="empty" (not "failed") when the service responds 200 but finds
+    # nothing to extract — the caller (ingestion_service) still treats this as
+    # a fallback trigger, but it's a materially different outcome for the
+    # dashboard than an unreachable/500 service.
+    await ParserDashboardService.record_run(
+        filename=filename, source="rag_ingest",
+        status="success" if blocks else "empty",
+        mode=mode, pages=data.get("pages"), blocks_count=len(blocks),
+        figures_count=len(data.get("images") or []), bytes_size=len(content),
+        duration_ms=duration_ms, markdown=data.get("markdown"),
     )
     return data
 
