@@ -37,7 +37,7 @@ from core.database import messages_collection, conversations_collection
 from services.history_service import HistoryService
 from services.prompt_builder import PromptBuilder
 from services.memory_service import MemoryService
-from services.credit_service import CreditService
+from services.credit_service import CreditService, CREDIT_GRACE_USD
 from services.langsmith_service import LangSmithService
 from services.turn_manager import turn_manager
 from graph.builder import get_agent_graph
@@ -672,7 +672,7 @@ class ChatService:
                                 total_input_tokens  * INPUT_PRICE_PER_TOKEN +
                                 total_output_tokens * OUTPUT_PRICE_PER_TOKEN
                             )
-                            if not credit_is_exempt and credit_spend_at_start + turn_cost_so_far >= credit_cap + CreditService.CREDIT_GRACE_USD:
+                            if not credit_is_exempt and credit_spend_at_start + turn_cost_so_far >= credit_cap + CREDIT_GRACE_USD:
                                 logger.warning(
                                     "credit.grace_exceeded — stopping turn",
                                     user_id=user_id, turn_id=turn_id,
