@@ -15,6 +15,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     shared-mime-info \
     && rm -rf /var/lib/apt/lists/*
 
+# Dedicated low-privilege user for sandboxed run_python/run_shell subprocess
+# execution (Tier 1.1, HARDENING_PLAN.md). The backend process itself still
+# runs as root (needed to chown per-user/per-conversation workspace
+# directories over to this user — see utils/workspace.py), but
+# user-authored agent code now executes AS this UID instead of inheriting
+# root, so the OS itself can finally tell "trusted app code" apart from
+# "arbitrary sandboxed code" — confirmed live via red-team testing that
+# with no separation at all, sandboxed code could reach the app's own
+# internal ports and the cloud metadata endpoint with zero restriction.
+RUN useradd --uid 1001 --create-home --shell /usr/sbin/nologin sandboxrunner
+ENV SANDBOX_UID=1001
+ENV SANDBOX_GID=1001
+
 WORKDIR /app
 
 COPY requirements.txt .

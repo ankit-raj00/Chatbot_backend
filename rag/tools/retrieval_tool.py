@@ -15,6 +15,7 @@ logger = structlog.get_logger(__name__)
 qdrant_manager = QdrantManager()
 
 from langchain_core.tools import tool
+from utils.untrusted_content import wrap_untrusted
 
 @tool
 def search_knowledge_base(
@@ -115,7 +116,12 @@ def search_knowledge_base(
             payload = doc.metadata or {}
 
             item = {
-                "content": doc.page_content,
+                # Ingested document content — untrusted by definition (a
+                # user-uploaded PDF could contain injected instruction-shaped
+                # text). Delimited so the model treats it as data to
+                # quote/summarize, never as instructions (see
+                # utils/untrusted_content.py).
+                "content": wrap_untrusted(doc.page_content, label="knowledge base document"),
                 "source": payload.get("source", "unknown"),
                 "section": payload.get("section_path") or payload.get("section"),
                 "page": payload.get("page"),

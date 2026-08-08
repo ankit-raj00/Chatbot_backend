@@ -14,6 +14,20 @@ BLOCKED_PATTERNS = [
     "rm -rf /", "rm -rf ~", "sudo rm", ":(){:|:&};:", "mkfs",
     "dd if=/dev/zero", "chmod -R 777 /", "> /dev/sda",
     "curl | sh", "wget | sh", "curl | bash", "wget | bash",
+    # Confirmed live: with NO restriction at all, a benign prompt led the
+    # agent to reach loopback (enumerating this app's own /admin/* routes)
+    # and the AWS metadata endpoint from inside run_python — this is the
+    # same protection for raw shell commands (curl/wget/nc/etc.), which the
+    # Python-level socket guard in code_executor.py doesn't cover since
+    # they're not Python code. Simple substring match (same mechanism as
+    # every other entry above), so this can over-match on an unrelated
+    # command that happens to mention one of these strings (e.g. grepping a
+    # log file containing "127.0.0.1") — an accepted tradeoff for a coding
+    # sandbox where the agent can always take a different approach if
+    # legitimately blocked. Broader ranges (RFC1918 generally) are enforced
+    # instead at the host firewall and the Python guard, where over-matching
+    # on short numeric substrings isn't a risk.
+    "169.254.169.254", "169.254.", "127.0.0.1", "localhost", "172.17.",
 ]
 
 

@@ -45,7 +45,9 @@ async def chat_stream(
     )
 
 @router.post("/stream/multimodal")
+@limiter.limit(f"{os.getenv('CHAT_RATE_LIMIT', '20')}/minute")
 async def chat_stream_multimodal(
+    request: Request,
     message: str = Form(...),
     conversation_id: str = Form(None),
     mcp_server_ids: str = Form(None), # JSON string
@@ -80,7 +82,9 @@ async def chat_stream_multimodal(
 
 
 @router.get("/{conversation_id}/active-turn")
+@limiter.limit("60/minute")
 async def get_active_turn(
+    request: Request,
     conversation_id: str,
     current_user: dict = Depends(get_current_user)
 ):
@@ -91,7 +95,9 @@ async def get_active_turn(
 
 
 @router.get("/{conversation_id}/resume")
+@limiter.limit("30/minute")
 async def resume_chat_stream(
+    request: Request,
     conversation_id: str,
     current_user: dict = Depends(get_current_user)
 ):
@@ -106,7 +112,9 @@ async def resume_chat_stream(
 
 
 @router.post("/{conversation_id}/stop")
+@limiter.limit("30/minute")
 async def stop_chat_generation(
+    request: Request,
     conversation_id: str,
     current_user: dict = Depends(get_current_user)
 ):

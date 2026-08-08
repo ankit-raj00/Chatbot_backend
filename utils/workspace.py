@@ -11,6 +11,37 @@ from pathlib import Path
 # Default: ~/agentx_workspace (works on Windows, Linux, Mac)
 WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", str(Path.home() / "agentx_workspace")))
 
+# ── Sandbox UID (Tier 1.1, HARDENING_PLAN.md) ────────────────────────────────
+# The backend container runs as root; run_python/run_shell used to execute
+# AS that same root user, in the same container, with no OS-level boundary
+# at all between "trusted app code" and "arbitrary user-authored code" —
+# confirmed exploitable via a live red-team run (unrestricted loopback/
+# internal-network reach). Unset (0) by default so local/Windows dev and any
+# environment that hasn't opted in are completely unaffected — root creates
+# and root runs everything, identical to before this existed. Only the
+# Docker image sets SANDBOX_UID, where a dedicated low-privilege user is
+# created specifically to run sandboxed subprocesses under.
+SANDBOX_UID = int(os.getenv("SANDBOX_UID", "0"))
+SANDBOX_GID = int(os.getenv("SANDBOX_GID", str(SANDBOX_UID)))
+_SANDBOX_USER_ACTIVE = bool(SANDBOX_UID) and os.name != "nt"
+
+
+def _chown_for_sandbox(path: Path) -> None:
+    """Best-effort, non-recursive: hand ownership of a freshly-created
+    (empty) workspace directory to the sandbox UID, so a subprocess running
+    AS that UID (not root) can actually read/write inside it. Only the
+    directory itself needs this — files created later are created BY the
+    sandbox subprocess itself and are already owned by it; nothing here
+    needs to be recursive except where root itself pre-populates a tree
+    (see venv_python_for, which instead just creates the venv AS the
+    sandbox UID to begin with, avoiding that case entirely)."""
+    if not _SANDBOX_USER_ACTIVE:
+        return
+    try:
+        os.chown(path, SANDBOX_UID, SANDBOX_GID)
+    except (PermissionError, AttributeError, OSError):
+        pass
+
 
 def workspace_for(user_id: str = "anonymous") -> Path:
     """Return (and create) the per-user workspace directory.
@@ -22,6 +53,7 @@ def workspace_for(user_id: str = "anonymous") -> Path:
     """
     ws = WORKSPACE_ROOT / user_id
     ws.mkdir(parents=True, exist_ok=True)
+    _chown_for_sandbox(ws)
     return ws
 
 
@@ -44,9 +76,18 @@ def conversation_workspace_for(user_id: str, conversation_id: str) -> Path:
     shared at the user level (workspace_for) since re-creating those per
     conversation would be pure waste.
     """
-    ws = workspace_for(user_id) / "conversations" / conversation_id
+    conversations_dir = workspace_for(user_id) / "conversations"
+    conversations_dir.mkdir(parents=True, exist_ok=True)
+    _chown_for_sandbox(conversations_dir)
+
+    ws = conversations_dir / conversation_id
+    ws.mkdir(parents=True, exist_ok=True)
+    _chown_for_sandbox(ws)
+
     for sub in ("uploads", "outputs", "work"):
-        (ws / sub).mkdir(parents=True, exist_ok=True)
+        sub_dir = ws / sub
+        sub_dir.mkdir(parents=True, exist_ok=True)
+        _chown_for_sandbox(sub_dir)
     return ws
 
 
@@ -68,14 +109,23 @@ def venv_python_for(user_id: str) -> Path:
     """
     import subprocess
     import sys
-    ws = workspace_for(user_id)
+    ws = workspace_for(user_id)  # already chowned to the sandbox UID if active
     venv_dir = ws / ".venv"
     python_path = (venv_dir / "Scripts" / "python.exe") if os.name == "nt" else (venv_dir / "bin" / "python")
     if not python_path.exists():
         try:
+            # Create the venv AS the sandbox UID from the start (parent `ws`
+            # is already writable by it) rather than as root then needing a
+            # recursive chown of everything `python -m venv` creates — the
+            # subprocess that will actually USE this venv (run_python) runs
+            # as the same UID, so this keeps ownership consistent everywhere.
+            kwargs = {}
+            if _SANDBOX_USER_ACTIVE:
+                kwargs["user"] = SANDBOX_UID
+                kwargs["group"] = SANDBOX_GID
             subprocess.run(
                 [sys.executable, "-m", "venv", str(venv_dir)],
-                check=True, capture_output=True,
+                check=True, capture_output=True, **kwargs,
             )
         except subprocess.CalledProcessError as e:
             raise RuntimeError(
@@ -88,12 +138,14 @@ def venv_python_for(user_id: str) -> Path:
 def pip_cache_dir_for(user_id: str) -> Path:
     d = workspace_for(user_id) / ".cache" / "pip"
     d.mkdir(parents=True, exist_ok=True)
+    _chown_for_sandbox(d)
     return d
 
 
 def npm_prefix_for(user_id: str) -> Path:
     d = workspace_for(user_id) / ".npm-global"
     d.mkdir(parents=True, exist_ok=True)
+    _chown_for_sandbox(d)
     return d
 
 
