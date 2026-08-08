@@ -10,6 +10,9 @@ import tempfile
 import time
 from pathlib import Path
 
+import structlog
+logger = structlog.get_logger(__name__)
+
 # ── Guardrails ──────────────────────────────────────────────────────────────
 MAX_LINE_LEN      = 8_192       # truncate any single output line
 MAX_TOTAL_OUTPUT  = 2_000_000   # ~2 MB hard cap on streamed output (bounds memory)
@@ -68,13 +71,19 @@ def _prepare_for_sandbox_user(path: str) -> None:
     the subprocess that executes it, which runs as a different, unprivileged
     UID once sandbox user separation is active. Without this, e.g.
     tempfile.NamedTemporaryFile's default mode-600 (owner-only) would make
-    the sandbox subprocess unable to open its own script. Best-effort."""
+    the sandbox subprocess unable to open its own script. Best-effort but
+    logged on failure — see the matching note in utils/workspace.py's
+    _chown_for_sandbox, which caught a real container-capability
+    misconfiguration (missing CAP_CHOWN) this exact way during testing."""
     if not _SANDBOX_USER_ACTIVE:
         return
     try:
         os.chown(path, SANDBOX_UID, SANDBOX_GID)
-    except (PermissionError, AttributeError, OSError):
-        pass
+    except (PermissionError, AttributeError, OSError) as e:
+        logger.warning(
+            "sandbox.chown_failed — sandboxed subprocess execution may break",
+            path=path, sandbox_uid=SANDBOX_UID, error=str(e),
+        )
 
 
 # ── Filesystem guard for run_python ──────────────────────────────────────────
