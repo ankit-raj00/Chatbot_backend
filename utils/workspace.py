@@ -6,6 +6,9 @@ Never define _DEFAULT_WS inline in individual files.
 import os
 from pathlib import Path
 
+import structlog
+logger = structlog.get_logger(__name__)
+
 # Single source of truth for workspace root
 # Set WORKSPACE_ROOT in .env to override
 # Default: ~/agentx_workspace (works on Windows, Linux, Mac)
@@ -27,20 +30,34 @@ _SANDBOX_USER_ACTIVE = bool(SANDBOX_UID) and os.name != "nt"
 
 
 def _chown_for_sandbox(path: Path) -> None:
-    """Best-effort, non-recursive: hand ownership of a freshly-created
-    (empty) workspace directory to the sandbox UID, so a subprocess running
-    AS that UID (not root) can actually read/write inside it. Only the
-    directory itself needs this — files created later are created BY the
-    sandbox subprocess itself and are already owned by it; nothing here
-    needs to be recursive except where root itself pre-populates a tree
-    (see venv_python_for, which instead just creates the venv AS the
-    sandbox UID to begin with, avoiding that case entirely)."""
+    """Best-effort (never raises into a caller — a chown failure shouldn't
+    break a chat turn), but LOGS on failure rather than silently passing:
+    caught a real deploy-config bug this way during testing — os.chown()
+    needs CAP_CHOWN specifically (distinct from CAP_SETUID/CAP_SETGID, which
+    only cover the subprocess's own identity change, not changing a FILE's
+    ownership), and a container capability set that dropped it made every
+    sandboxed script unreadable by the UID meant to run it, with the only
+    symptom being a generic PermissionError deep in subprocess creation. If
+    this is silently swallowed again in some other misconfiguration, the
+    sandbox degrades in a way that's hard to diagnose from the outside.
+
+    Non-recursive: hand ownership of a freshly-created (empty) workspace
+    directory to the sandbox UID, so a subprocess running AS that UID (not
+    root) can actually read/write inside it. Only the directory itself
+    needs this — files created later are created BY the sandbox subprocess
+    itself and are already owned by it; nothing here needs to be recursive
+    except where root itself pre-populates a tree (see venv_python_for,
+    which instead just creates the venv AS the sandbox UID to begin with,
+    avoiding that case entirely)."""
     if not _SANDBOX_USER_ACTIVE:
         return
     try:
         os.chown(path, SANDBOX_UID, SANDBOX_GID)
-    except (PermissionError, AttributeError, OSError):
-        pass
+    except (PermissionError, AttributeError, OSError) as e:
+        logger.warning(
+            "sandbox.chown_failed — sandboxed subprocess execution may break",
+            path=str(path), sandbox_uid=SANDBOX_UID, error=str(e),
+        )
 
 
 def workspace_for(user_id: str = "anonymous") -> Path:
