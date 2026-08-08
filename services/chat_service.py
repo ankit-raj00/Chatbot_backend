@@ -20,6 +20,7 @@ _run_turn() flow:
     8. Invalidate history cache
 """
 
+import os
 import json
 import logging
 import asyncio
@@ -36,6 +37,8 @@ from core.database import messages_collection, conversations_collection
 from services.history_service import HistoryService
 from services.prompt_builder import PromptBuilder
 from services.memory_service import MemoryService
+from services.credit_service import CreditService
+from services.langsmith_service import LangSmithService
 from services.turn_manager import turn_manager
 from graph.builder import get_agent_graph
 from graph.nodes.common import ChatState
@@ -123,9 +126,16 @@ class ChatService:
         )
 
     @staticmethod
-    async def _persist_stopped_message(cid: str, user_id: str, content: str, timeline: list) -> None:
+    async def _persist_stopped_message(
+        cid: str, user_id: str, content: str, timeline: list,
+        input_tokens: int = 0, output_tokens: int = 0, cost_usd: float = 0.0,
+    ) -> None:
         """Persist a partial assistant message when a turn was stopped/cancelled,
-        so the streamed-so-far content isn't lost on reload."""
+        so the streamed-so-far content isn't lost on reload. A stopped turn
+        (whether user-initiated or the credit grace-buffer cutoff) still
+        consumed real tokens, so this also records/deducts whatever cost was
+        actually accrued — not just $0, or the grace buffer never actually
+        gets billed."""
         try:
             await messages_collection.insert_one({
                 "conversation_id": cid,
@@ -134,11 +144,16 @@ class ChatService:
                 "content":         content,
                 "timeline":        timeline,
                 "stopped":         True,
+                "input_tokens":    input_tokens,
+                "output_tokens":   output_tokens,
+                "cost_usd":        round(cost_usd, 8),
                 "timestamp":       datetime.now(),
             })
             await HistoryService.invalidate(cid)
         except Exception as e:
             logger.warning(f"failed to persist stopped message: {e}")
+        if cost_usd > 0:
+            spawn(CreditService.record_and_deduct(user_id, cost_usd), name="credit_deduction_stopped")
 
     @classmethod
     async def stream(
@@ -168,6 +183,19 @@ class ChatService:
         enabled_tools       = enabled_tools or []
         mcp_server_ids      = mcp_server_ids or []
         files_content_parts = files_content_parts or []
+
+        # ── Credit pre-check ────────────────────────────────────────────
+        # Hard block BEFORE any conversation/message gets created — a blocked
+        # turn should leave no trace. Same SSE error channel used everywhere
+        # else in this method (see the Step 1-2 except block below), so the
+        # frontend's existing `data.error` handling picks this up unchanged;
+        # error_code lets it show a specific message instead of the generic
+        # fallback (see ChatPage.jsx).
+        if not await CreditService.has_credit(user_id):
+            cap = await CreditService.get_cap(user_id)
+            block_message = f"You've used your ${cap:.0f} free credit. Upgrade to keep chatting."
+            yield f"data: {json.dumps({'error': block_message, 'error_code': 'credit_limit_reached'})}\n\n"
+            return
 
         # Steps 1-2 aren't inside _run_turn's try/except (that only guards
         # the spawned background task) — guard them here so a failure this
@@ -338,6 +366,11 @@ class ChatService:
             }
 
             config = {
+                # Reuses the same turn_id already minted for turn_manager /
+                # configurable.turn_id below — this becomes the LangSmith root
+                # run's ID, so a real per-turn cost can be attached to it
+                # after the turn completes (see LangSmithService.attach_cost).
+                "run_id":   uuid.UUID(turn_id),
                 "run_name": f"supervisor | user={user_id[:8]} | conv={conversation_id[:8]}",
                 "tags":     [f"user:{user_id}", f"conv:{conversation_id}", f"model:{model}"],
                 "metadata": {
@@ -430,6 +463,16 @@ class ChatService:
             _price = ModelConfig.get_pricing(model)
             INPUT_PRICE_PER_TOKEN  = _price["input"]
             OUTPUT_PRICE_PER_TOKEN = _price["output"]
+
+            # Read once, not on every loop iteration below — this turn's mid-
+            # generation grace cutoff checks (spend before this turn started)
+            # + (cost accrued so far this turn) against (cap + grace buffer).
+            # Admins are exempt here too — checked once, same as the pre-turn
+            # block in stream(), so a long admin turn can't get killed
+            # mid-generation by a cap they're exempt from starting under.
+            credit_is_exempt      = await CreditService._is_admin(user_id)
+            credit_spend_at_start = 0.0 if credit_is_exempt else await CreditService.get_spend(user_id)
+            credit_cap            = 0.0 if credit_is_exempt else await CreditService.get_cap(user_id)
 
             agent_graph = await get_agent_graph()
 
@@ -576,23 +619,31 @@ class ChatService:
                     turn_manager.publish(turn_id, {'exec_output': data})
 
 
-                # Token tracking and final text fallback
-                elif event_type == "on_chat_model_end" and node_name == "agent_node":
+                # Token tracking and final text fallback. Fires for BOTH
+                # agent_node (the real conversational LLM calls) and
+                # agent_tool_node (its periodic _progress_check "stuck loop"
+                # judge call, every 10 tool calls) — both are real billable
+                # calls on the same model, so both must count toward cost.
+                # Only agent_node's output is real chat content though: the
+                # judge call's output is a JSON verdict, not something that
+                # should ever land in full_response.
+                elif event_type == "on_chat_model_end" and node_name in ("agent_node", "agent_tool_node"):
                     output_msg = event.get("data", {}).get("output")
                     if output_msg:
-                        # Fallback: if no text was streamed, capture it here
-                        content = getattr(output_msg, "content", "")
-                        if content and isinstance(content, str) and content not in full_response:
-                            full_response += content
-                            _tl_add_text(content)
-                            turn_manager.publish(turn_id, {'chunk': content})
-                        elif isinstance(content, list):
-                            text_parts = [p["text"] if isinstance(p, dict) and "text" in p else str(p) for p in content if isinstance(p, dict) and "text" in p or isinstance(p, str)]
-                            text_str = "".join(text_parts)
-                            if text_str and text_str not in full_response:
-                                full_response += text_str
-                                _tl_add_text(text_str)
-                                turn_manager.publish(turn_id, {'chunk': text_str})
+                        if node_name == "agent_node":
+                            # Fallback: if no text was streamed, capture it here
+                            content = getattr(output_msg, "content", "")
+                            if content and isinstance(content, str) and content not in full_response:
+                                full_response += content
+                                _tl_add_text(content)
+                                turn_manager.publish(turn_id, {'chunk': content})
+                            elif isinstance(content, list):
+                                text_parts = [p["text"] if isinstance(p, dict) and "text" in p else str(p) for p in content if isinstance(p, dict) and "text" in p or isinstance(p, str)]
+                                text_str = "".join(text_parts)
+                                if text_str and text_str not in full_response:
+                                    full_response += text_str
+                                    _tl_add_text(text_str)
+                                    turn_manager.publish(turn_id, {'chunk': text_str})
 
                         usage = getattr(output_msg, "usage_metadata", None)
                         if usage:
@@ -607,6 +658,28 @@ class ChatService:
                                 input_tokens=usage.get("input_tokens", 0),
                                 output_tokens=usage.get("output_tokens", 0),
                             )
+
+                            # Mid-turn grace cutoff: let an already-running
+                            # turn spend up to CREDIT_GRACE_USD past the cap
+                            # rather than hard-killing it the instant it
+                            # crosses (a new turn is blocked outright by the
+                            # pre-check above instead). Cancelling here drives
+                            # the SAME asyncio.CancelledError path already
+                            # used by POST /chat/{id}/stop — partial content
+                            # gets persisted, a clean 'stopped' event goes
+                            # out, no new protocol needed.
+                            turn_cost_so_far = (
+                                total_input_tokens  * INPUT_PRICE_PER_TOKEN +
+                                total_output_tokens * OUTPUT_PRICE_PER_TOKEN
+                            )
+                            if not credit_is_exempt and credit_spend_at_start + turn_cost_so_far >= credit_cap + CreditService.CREDIT_GRACE_USD:
+                                logger.warning(
+                                    "credit.grace_exceeded — stopping turn",
+                                    user_id=user_id, turn_id=turn_id,
+                                    spend_at_start=credit_spend_at_start,
+                                    turn_cost_so_far=turn_cost_so_far, cap=credit_cap,
+                                )
+                                asyncio.current_task().cancel()
 
             # ── Step 7b: Detect files created/updated during this agent run ──────
             created_files = []
@@ -666,6 +739,21 @@ class ChatService:
                 "timestamp":       datetime.now()
             })
 
+            # ── Step 8b: Deduct credit + attach real cost to the LangSmith
+            # run (tracked bg tasks — never block the response on billing or
+            # tracing) ───────────────────────────────────────────────────
+            if cost_usd > 0:
+                spawn(CreditService.record_and_deduct(user_id, cost_usd), name="credit_deduction")
+            if os.getenv("LANGCHAIN_TRACING_V2", "false").lower() == "true":
+                spawn(
+                    LangSmithService.attach_cost(
+                        run_id=turn_id, cost_usd=cost_usd,
+                        input_tokens=total_input_tokens, output_tokens=total_output_tokens,
+                        model=model,
+                    ),
+                    name="langsmith_cost_attach",
+                )
+
             # ── Step 9: Async memory extraction (tracked bg task) ───────
             spawn(
                 MemoryService.extract_and_store(
@@ -694,8 +782,13 @@ class ChatService:
             partial = locals().get("full_response", "") or ""
             tl = locals().get("timeline", []) or []
             cid = locals().get("conversation_id")
-            if cid and (partial or tl):
-                await cls._persist_stopped_message(cid, user_id, partial, tl)
+            in_tok  = locals().get("total_input_tokens", 0) or 0
+            out_tok = locals().get("total_output_tokens", 0) or 0
+            in_price  = locals().get("INPUT_PRICE_PER_TOKEN", 0.0) or 0.0
+            out_price = locals().get("OUTPUT_PRICE_PER_TOKEN", 0.0) or 0.0
+            partial_cost = in_tok * in_price + out_tok * out_price
+            if cid and (partial or tl or in_tok or out_tok):
+                await cls._persist_stopped_message(cid, user_id, partial, tl, in_tok, out_tok, partial_cost)
             turn_manager.publish(turn_id, {'stopped': True})
             turn_manager.finish(turn_id, "stopped")
 
