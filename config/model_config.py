@@ -25,8 +25,12 @@ class ModelConfig:
             "supports_audio": True,
             "max_tokens": 8192,
             "context_window": 1000000,
-            "price_in": 0.0,
-            "price_out": 0.0,
+            # Google's official standard-tier Gemini 3.5 Flash pricing, USD per
+            # 1M tokens (output includes thinking tokens). OmniRoute reports
+            # $0 for every call through the free "antigravity" provider pool,
+            # so this is what turns real token counts into a real cost.
+            "price_in": 1.50,
+            "price_out": 9.00,
         },
     }
 

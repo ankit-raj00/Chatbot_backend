@@ -110,6 +110,11 @@ def test_model_config_pricing_shape():
     from config.model_config import ModelConfig
     p = ModelConfig.get_pricing(ModelConfig.DEFAULT_MODEL)
     assert set(p) == {"input", "output"}
+    # real per-token prices now configured (not the placeholder zeros) — not
+    # pinning exact values here since prices can change, just that cost
+    # computation is no longer a guaranteed-zero no-op.
+    assert p["input"] > 0.0
+    assert p["output"] > 0.0
     # unknown model -> zeros, never a crash
     z = ModelConfig.get_pricing("does/not-exist")
     assert z == {"input": 0.0, "output": 0.0}

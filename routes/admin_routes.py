@@ -9,6 +9,7 @@ Promote a user to admin via MongoDB:
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from core.middleware import get_current_user
 from core.database import users_collection, messages_collection, conversations_collection
+from services.credit_service import DEFAULT_CREDIT_CAP_USD
 from bson import ObjectId
 from datetime import datetime, timedelta
 import structlog
@@ -128,6 +129,15 @@ async def get_all_users(
             "total_input_tokens":  stats.get("total_input_tokens", 0),
             "total_output_tokens": stats.get("total_output_tokens", 0),
             "total_cost_usd":      round(stats.get("total_cost_usd", 0.0), 6),
+            # Credit ledger (services/credit_service.py) — the running total
+            # kept on the user doc itself, cheap to read here since `user`
+            # is already fetched; should track total_cost_usd above (both
+            # derive from the same per-message cost_usd), this is just the
+            # fast field instead of re-aggregating. Admins aren't capped
+            # (see CreditService.has_credit) but their spend is still
+            # tracked, so this is meaningful for every row including theirs.
+            "credits_used_usd":    round(user.get("credits_used_usd", 0.0), 6),
+            "credit_cap_usd":      user.get("credit_cap_usd", DEFAULT_CREDIT_CAP_USD),
         })
 
     total = await users_collection.count_documents({})
