@@ -31,6 +31,16 @@ from bson import ObjectId
 from config.model_config import ModelConfig
 DEFAULT_MODEL = ModelConfig.DEFAULT_MODEL
 
+# Absolute per-turn cost ceiling, independent of the credit system's cap +
+# grace buffer — applies to EVERY turn including admin-exempt users (admins
+# skip credit enforcement entirely, so without this there was literally no
+# cost ceiling for them beyond the step-count-based guards in
+# agent_tool_node.py). A generous default: legitimate long agentic turns can
+# still run; a genuinely runaway turn (confirmed live: 22,841 input tokens
+# on a single ordinary, non-adversarial prompt) gets cut off well before it
+# becomes expensive.
+MAX_TURN_COST_USD = float(os.getenv("MAX_TURN_COST_USD", "0.50"))
+
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from core.database import messages_collection, conversations_collection
@@ -693,6 +703,17 @@ class ChatService:
                                     user_id=user_id, turn_id=turn_id,
                                     spend_at_start=credit_spend_at_start,
                                     turn_cost_so_far=turn_cost_so_far, cap=credit_cap,
+                                )
+                                asyncio.current_task().cancel()
+
+                            # Absolute ceiling — applies unconditionally, even
+                            # to admin/credit-exempt accounts (see
+                            # MAX_TURN_COST_USD above). Same cancel path.
+                            elif turn_cost_so_far >= MAX_TURN_COST_USD:
+                                logger.warning(
+                                    "turn.cost_ceiling_exceeded — stopping turn",
+                                    user_id=user_id, turn_id=turn_id,
+                                    turn_cost_so_far=turn_cost_so_far, ceiling=MAX_TURN_COST_USD,
                                 )
                                 asyncio.current_task().cancel()
 

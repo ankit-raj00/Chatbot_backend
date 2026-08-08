@@ -44,6 +44,39 @@ def sandbox_env(extra: dict | None = None) -> dict:
     return base
 
 
+# ── Sandbox UID (Tier 1.1, HARDENING_PLAN.md) ────────────────────────────────
+# Reuses utils.workspace's env-var reading so there's exactly one source of
+# truth for whether this is active — see that module's docstring for the
+# full rationale (unset by default; only the Docker image opts in).
+from utils.workspace import SANDBOX_UID, SANDBOX_GID, _SANDBOX_USER_ACTIVE
+
+
+def _sandbox_user_kwargs() -> dict:
+    """kwargs for asyncio.create_subprocess_exec/_shell that run the
+    sandboxed subprocess as the dedicated low-privilege UID instead of
+    inheriting this process's own (root). Empty dict — meaning "run as
+    whatever this process already is" — unless SANDBOX_UID is configured;
+    never passes user=/group= on Windows, where subprocess raises ValueError
+    if either is non-None at all, even from local/Windows dev."""
+    if not _SANDBOX_USER_ACTIVE:
+        return {}
+    return {"user": SANDBOX_UID, "group": SANDBOX_GID}
+
+
+def _prepare_for_sandbox_user(path: str) -> None:
+    """A script file gets WRITTEN by this process (root) but must be READ by
+    the subprocess that executes it, which runs as a different, unprivileged
+    UID once sandbox user separation is active. Without this, e.g.
+    tempfile.NamedTemporaryFile's default mode-600 (owner-only) would make
+    the sandbox subprocess unable to open its own script. Best-effort."""
+    if not _SANDBOX_USER_ACTIVE:
+        return
+    try:
+        os.chown(path, SANDBOX_UID, SANDBOX_GID)
+    except (PermissionError, AttributeError, OSError):
+        pass
+
+
 # ── Filesystem guard for run_python ──────────────────────────────────────────
 # run_python executes arbitrary user-authored Python. `cwd=` only sets the
 # DEFAULT for relative paths — it does NOT stop the script from using an
@@ -109,16 +142,65 @@ _SANDBOX_GUARD_PREAMBLE = (
     "        setattr(_pl.Path, _m, _mk())\n"
 )
 
+# ── Network guard for run_python ─────────────────────────────────────────────
+# Confirmed live via red-team testing: sandboxed Python had ZERO network
+# restriction — a completely benign prompt (no adversarial phrasing at all)
+# led the agent to port-scan loopback, enumerate this app's own OpenAPI
+# schema and /admin/* routes over 127.0.0.1, and separately reach the AWS
+# instance metadata endpoint (169.254.169.254), stopping only because the
+# IMDSv2 token exchange wasn't attempted — the app's own JWT auth returning
+# 401 on those internal calls was the only thing that prevented real data
+# access, and that's a lucky second line of defence, not a designed control.
+#
+# This blocks the DANGEROUS destination ranges only (loopback, RFC1918,
+# link-local/metadata) — NOT general internet access, which is a legitimate
+# thing for sandboxed code to need (calling a public API, pip/npm installs).
+# Resolves hostnames before checking so `connect(('somehost', port))` can't
+# dodge the check just by not being a literal IP.
+#
+# ⚠️ HONEST LIMITATION, same as the filesystem guard above: this is an
+# in-process Python-level patch, not OS-level isolation — it stops the
+# accidental/exploratory case actually observed, not a determined attacker
+# using ctypes or a raw syscall to bypass Python's socket module entirely.
+# The robust fix is running this subprocess as a non-root UID with real
+# kernel-enforced egress rules (see HARDENING_PLAN.md Tier 1.1/1.2).
+_SOCKET_GUARD_PREAMBLE = (
+    "import socket as _sock, ipaddress as _ipaddr\n"
+    "_BLOCKED_NETS = [_ipaddr.ip_network(_n) for _n in ("
+    "'127.0.0.0/8', '::1/128', '169.254.0.0/16', '10.0.0.0/8', "
+    "'172.16.0.0/12', '192.168.0.0/16')]\n"
+    "def _sbx_net_check(_addr):\n"
+    "    try:\n"
+    "        _host = _addr[0] if isinstance(_addr, tuple) else _addr\n"
+    "        _ip = _ipaddr.ip_address(_sock.gethostbyname(_host))\n"
+    "    except Exception:\n"
+    "        return\n"
+    "    for _net in _BLOCKED_NETS:\n"
+    "        if _ip in _net:\n"
+    "            raise PermissionError('SANDBOX: network access to ' + str(_ip) + ' is not allowed')\n"
+    "_real_sock_connect = _sock.socket.connect\n"
+    "def _sbx_connect(self, _addr, *a, **k):\n"
+    "    _sbx_net_check(_addr)\n"
+    "    return _real_sock_connect(self, _addr, *a, **k)\n"
+    "_sock.socket.connect = _sbx_connect\n"
+    "_real_sock_connect_ex = _sock.socket.connect_ex\n"
+    "def _sbx_connect_ex(self, _addr, *a, **k):\n"
+    "    _sbx_net_check(_addr)\n"
+    "    return _real_sock_connect_ex(self, _addr, *a, **k)\n"
+    "_sock.socket.connect_ex = _sbx_connect_ex\n"
+)
+
 
 def _guarded_launch_args(python_executable: str, script_file: str) -> list[str]:
     """
-    Build the interpreter argv that installs the filesystem guard BEFORE
-    executing the user's script — via -c so the saved script FILE itself
-    stays byte-for-byte the user's code (still cleanly editable with
-    edit_file afterward; no wrapper lines injected into it).
+    Build the interpreter argv that installs the filesystem AND network
+    guards BEFORE executing the user's script — via -c so the saved script
+    FILE itself stays byte-for-byte the user's code (still cleanly editable
+    with edit_file afterward; no wrapper lines injected into it).
     """
     runner = (
         _SANDBOX_GUARD_PREAMBLE
+        + _SOCKET_GUARD_PREAMBLE
         + f"exec(compile(open({script_file!r}, encoding='utf-8').read(), {script_file!r}, 'exec'))\n"
     )
     return [python_executable, "-u", "-c", runner]
@@ -250,9 +332,16 @@ async def stream_python(code: str, cwd: str, timeout: int = 300, python_executab
         Path(script_path).write_text(code, encoding="utf-8")
         tmp = script_path
     else:
+        # NamedTemporaryFile defaults to mode 600 (owner-only) — this
+        # process (the backend, root) writes it, but the SUBPROCESS that
+        # needs to read and exec it runs as a different, unprivileged UID
+        # once SANDBOX_UID is active (see below). Without the chmod/chown
+        # fix-up, that subprocess would get a plain PermissionError trying
+        # to open its own script.
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", dir=cwd, delete=False, encoding="utf-8") as f:
             f.write(code)
             tmp = f.name
+    _prepare_for_sandbox_user(tmp)
 
     proc = await asyncio.create_subprocess_exec(
         *_guarded_launch_args(python_executable, tmp),
@@ -260,6 +349,7 @@ async def stream_python(code: str, cwd: str, timeout: int = 300, python_executab
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         env=sandbox_env(env),
+        **_sandbox_user_kwargs(),
     )
     try:
         async for item in _stream_proc(proc, timeout):
@@ -287,6 +377,7 @@ async def stream_shell(command: str, cwd: str, timeout: int = 120, blocked_patte
         command, cwd=cwd, env=sandbox_env(env),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        **_sandbox_user_kwargs(),
     )
     async for item in _stream_proc(proc, timeout):
         yield item
@@ -303,6 +394,7 @@ async def run_python(code: str, cwd: str, timeout: int = 300) -> str:
     ) as f:
         f.write(code)
         tmp = f.name
+    _prepare_for_sandbox_user(tmp)
     try:
         proc = await asyncio.create_subprocess_exec(
             *_guarded_launch_args(sys.executable, tmp),
@@ -310,6 +402,7 @@ async def run_python(code: str, cwd: str, timeout: int = 300) -> str:
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=sandbox_env(),
+            **_sandbox_user_kwargs(),
         )
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -344,6 +437,7 @@ async def auto_install_and_retry(code: str, error: str, cwd: str) -> str | None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=sandbox_env(),
+            **_sandbox_user_kwargs(),
         )
         await asyncio.wait_for(proc.communicate(), timeout=120)
         return await run_python(code, cwd)
@@ -372,6 +466,7 @@ async def run_shell(cmd: str, cwd: str, blocked_patterns: list[str] | None = Non
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=sandbox_env(env),
+            **_sandbox_user_kwargs(),
         )
         out, err = await asyncio.wait_for(proc.communicate(), timeout=30)
         return ((out.decode("utf-8", "replace") + err.decode("utf-8", "replace")).strip() or "(no output)")[:8000]

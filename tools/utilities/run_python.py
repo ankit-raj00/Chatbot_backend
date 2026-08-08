@@ -13,13 +13,37 @@ from pathlib import Path
 from langchain_core.tools import tool
 from langchain_core.callbacks import adispatch_custom_event
 from utils.workspace import conversation_workspace_for, venv_python_for, pip_cache_dir_for, is_path_within_conversation_sandbox
-from utils.code_executor import stream_python, sandbox_env
+from utils.code_executor import stream_python, sandbox_env, _sandbox_user_kwargs
 
 _TIMEOUT = 300  # seconds
 
 
+def _find_local_module(cwd: str, module_name: str) -> str | None:
+    """Best-effort: does <module_name>.py or <module_name>/__init__.py exist
+    anywhere under this conversation's workspace? If so, the real problem is
+    a missing sys.path entry, not a missing PyPI package — auto-installing
+    would otherwise pull an arbitrary PyPI package (whatever happens to be
+    published under a name that collides with the agent's own filename)
+    into the user's persistent venv unprompted. Confirmed misfire: a script
+    imported a sibling file it had just saved as `file_c.py`, and this
+    function tried `pip install file_c` before falling back to fixing
+    sys.path."""
+    root = Path(cwd)
+    if not root.exists():
+        return None
+    for candidate in root.rglob(f"{module_name}.py"):
+        return str(candidate.relative_to(root))
+    for candidate in root.rglob(f"{module_name}/__init__.py"):
+        return str(candidate.parent.relative_to(root))
+    return None
+
+
 async def _auto_install_and_retry_streaming(code: str, error: str, cwd: str, user_id: str,
                                              script_path: str | None) -> str | None:
+    """Returns a fully-formed message to show the agent (already includes
+    whatever prefix/explanation is appropriate), or None if `error` wasn't a
+    'No module named' error at all — callers should leave the original
+    output untouched in that case."""
     if "No module named" not in error:
         return None
     try:
@@ -28,6 +52,12 @@ async def _auto_install_and_retry_streaming(code: str, error: str, cwd: str, use
         pkg = pkg_map.get(pkg_raw, pkg_raw)
     except IndexError:
         return None
+
+    local_match = await asyncio.to_thread(_find_local_module, cwd, pkg_raw)
+    if local_match:
+        return (f"'{pkg_raw}' looks like a local file ({local_match}) in this workspace, not a "
+                f"PyPI package — not auto-installing it. Add its directory to sys.path, or "
+                f"import/run it as a relative module instead.")
 
     # venv already exists by now (run_python built it) — resolve off the loop anyway.
     venv_python = await asyncio.to_thread(venv_python_for, user_id)
@@ -38,6 +68,7 @@ async def _auto_install_and_retry_streaming(code: str, error: str, cwd: str, use
         pip_path, "install", pkg, "--quiet", "--cache-dir", cache_dir,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         env=sandbox_env({"PIP_CACHE_DIR": cache_dir}),
+        **_sandbox_user_kwargs(),
     )
     _, install_err = await install_proc.communicate()
     if install_proc.returncode != 0:
@@ -54,7 +85,8 @@ async def _auto_install_and_retry_streaming(code: str, error: str, cwd: str, use
                 {"tool": "run_python", "line": item["line"], "stream": item["stream"]},
             )
 
-    return "\n".join(lines) or "(no output)"
+    joined = "\n".join(lines) or "(no output)"
+    return f"[Auto-installed missing package and retried]\n{joined}"
 
 
 def make_run_python_tool(user_id: str, conversation_id: str):
@@ -120,7 +152,7 @@ def make_run_python_tool(user_id: str, conversation_id: str):
         if "ModuleNotFoundError" in output or "No module named" in output:
             retry = await _auto_install_and_retry_streaming(code, output, cwd, user_id, script_path)
             if retry is not None:
-                return f"[Auto-installed missing package and retried]\n{retry}"
+                return retry
         if filename:
             output = f"[Saved to {filename}]\n{output}"
         return output[:10000]

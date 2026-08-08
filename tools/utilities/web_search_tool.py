@@ -18,6 +18,7 @@ works immediately once renamed. Do not rename this back to "web_search".
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from rag.tools.web_search import search_web
+from utils.untrusted_content import wrap_untrusted
 
 
 class InternetSearchArgs(BaseModel):
@@ -32,7 +33,10 @@ async def internet_search(query: str):
         return [{"info": "No web results found (or web search is unavailable right now)."}]
     return [
         {
-            "content": d.page_content[:4000],
+            # Raw, live web content — untrusted by definition. Delimited so
+            # the model can't be steered by instruction-shaped text inside
+            # the page (see utils/untrusted_content.py).
+            "content": wrap_untrusted(d.page_content[:4000], label="web page content"),
             "source": d.metadata.get("source", ""),
             "title": d.metadata.get("title", ""),
         }

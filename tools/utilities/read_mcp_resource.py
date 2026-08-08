@@ -21,9 +21,16 @@ async def read_mcp_resource(uri: str, user_id: str = "", mcp_server_ids: Optiona
       scoping the search to this user's currently-selected servers only.
     """
     from utils.mcp_connection_manager import mcp_manager
+    from utils.untrusted_content import wrap_untrusted
 
     try:
         content = await mcp_manager.load_resource(user_id, mcp_server_ids or [], uri)
+        # MCP servers are externally connected (Google Drive, filesystem,
+        # etc., possibly third-party) — their resource content is untrusted
+        # the same way a web page or uploaded document is. Only delimit
+        # plain-text content; non-string payloads pass through as-is.
+        if isinstance(content, str):
+            content = wrap_untrusted(content, label="MCP resource content")
         return {"content": content}
     except Exception as e:
         return {"error": f"Failed to read resource {uri}: {str(e)}"}

@@ -99,6 +99,18 @@ _STALE_RESULT_MAX = 2
 _PROGRESS_CHECK_INTERVAL = 10
 _PROGRESS_CHECK_WINDOW = 10
 
+# Absolute backstop, independent of any of the heuristics above: no turn may
+# make more than this many tool calls, full stop. With recursion_limit=150 a
+# turn that dodges every softer guard (different tools, different args, the
+# judge itself being fooled) could otherwise run ~75 rounds before the graph's
+# own hard limit kills it with an unfriendly "step limit reached" error.
+# Confirmed live: a single benign, non-adversarial prompt produced 29 tool
+# calls / ~30 LLM round-trips (input tokens 6,715 -> 22,841) with no
+# adversarial prompting at all — prose warnings alone don't reliably stop
+# this. See force_final_answer in ChatState / agent_node.py for how this is
+# actually enforced (not just requested).
+_HARD_TOOL_CALL_CEILING = 40
+
 
 def _same_tool_call_count(messages, name: str) -> int:
     """How many times ANY call to this tool name appears in the current turn."""
@@ -525,6 +537,8 @@ async def agent_tool_node(state: ChatState, config: RunnableConfig) -> dict:
     # stuck-loop run never triggered this check even once, specifically
     # because of this skip (conversation 6a71a1bfa11cf10ed1232e44). Fix:
     # detect whether a multiple of N falls ANYWHERE in (before, after].
+    force_final_answer = False
+
     total_calls = _total_tool_call_count(state["messages"])
     total_before = total_calls - len(tool_calls)
     crossed_boundary = (total_before // _PROGRESS_CHECK_INTERVAL) != (total_calls // _PROGRESS_CHECK_INTERVAL)
@@ -533,8 +547,9 @@ async def agent_tool_node(state: ChatState, config: RunnableConfig) -> dict:
         verdict = await _progress_check(trajectory, model_name)
         if verdict.get("status") == "stuck":
             # Escalate on a REPEAT stuck verdict this turn — a model that
-            # ignored the first soft nudge needs stronger, more absolute
-            # language, not the same wording again.
+            # ignored the first soft nudge needs an actual stop, not the same
+            # wording again (see force_final_answer in ChatState/agent_node.py:
+            # this is what makes "last warning" a real one).
             prior_stuck_checks = sum(
                 1 for m in state["messages"]
                 if isinstance(m, ToolMessage) and isinstance(m.content, str) and "PROGRESS CHECK" in m.content
@@ -547,12 +562,13 @@ async def agent_tool_node(state: ChatState, config: RunnableConfig) -> dict:
                     f"you've already found, and clearly state what you were unable to resolve."
                 )
             else:
+                force_final_answer = True
                 directive = (
                     f"\n\n🛑🛑 PROGRESS CHECK (repeat #{prior_stuck_checks + 1}): you were ALREADY told to stop "
                     f"and answer, and made MORE tool calls instead — {verdict.get('reason', 'still no new progress')}. "
-                    f"This is your last warning before this turn is forcibly terminated. Do NOT call any more "
-                    f"tools. Respond with your final answer THIS TURN, stating plainly what you completed and "
-                    f"what you could not."
+                    f"Tool access has now been removed for your next response — you cannot call any more tools "
+                    f"this turn. Answer now with what you already have, and state plainly what you could not "
+                    f"complete."
                 )
             results = [
                 ToolMessage(content=(r.content + directive) if isinstance(r.content, str) else r.content,
@@ -560,4 +576,20 @@ async def agent_tool_node(state: ChatState, config: RunnableConfig) -> dict:
                 for r in results
             ]
 
-    return {"messages": list(results)}
+    # Absolute backstop — independent of the judge above (which is itself an
+    # LLM call and can be wrong/fooled). No prose asks for this one; tool
+    # access is just removed.
+    if total_calls >= _HARD_TOOL_CALL_CEILING:
+        force_final_answer = True
+        ceiling_notice = (
+            f"\n\n🛑 HARD LIMIT: this turn has made {total_calls} tool calls, its absolute maximum. "
+            f"Tool access has been removed — answer now with your best final response based on "
+            f"everything gathered so far, and state plainly what you could not complete."
+        )
+        results = [
+            ToolMessage(content=(r.content + ceiling_notice) if isinstance(r.content, str) else r.content,
+                        name=r.name, tool_call_id=r.tool_call_id, status=r.status)
+            for r in results
+        ]
+
+    return {"messages": list(results), "force_final_answer": force_final_answer}
