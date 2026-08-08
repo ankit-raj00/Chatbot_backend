@@ -197,6 +197,18 @@ class ChatService:
             yield f"data: {json.dumps({'error': block_message, 'error_code': 'credit_limit_reached'})}\n\n"
             return
 
+        # ── Turn concurrency lock ────────────────────────────────────────
+        # Closes the race where several concurrent turns (different
+        # conversations, or a direct API call bypassing the frontend's
+        # single-composer UX) would each pass has_credit() independently
+        # since none of them have deducted anything yet — only the
+        # (N+1)th of N simultaneous turns would actually see the cap. One
+        # in-flight turn per user; released in _run_turn's finally block
+        # on every exit path (success, stop, error).
+        if not await CreditService.acquire_turn_lock(user_id):
+            yield f"data: {json.dumps({'error': 'You already have a generation in progress. Please wait for it to finish.', 'error_code': 'turn_in_progress'})}\n\n"
+            return
+
         # Steps 1-2 aren't inside _run_turn's try/except (that only guards
         # the spawned background task) — guard them here so a failure this
         # early (bad conversation_id, a Mongo hiccup) still surfaces as a
@@ -220,6 +232,9 @@ class ChatService:
             inserted_user_msg_id = result.inserted_id
         except Exception as e:
             logger.error(f"ChatService.stream setup error: {e}", exc_info=True)
+            # _run_turn never gets spawned on this path, so its finally block
+            # never runs — release the lock here or it'd leak until its TTL.
+            await CreditService.release_turn_lock(user_id)
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
             return
 
@@ -830,3 +845,12 @@ class ChatService:
 
             turn_manager.publish(turn_id, {'error': friendly})
             turn_manager.finish(turn_id, "error")
+
+        finally:
+            # Every exit path from this method (success falls through past
+            # the except blocks, CancelledError, and generic Exception all
+            # land here) releases the one-turn-per-user lock acquired in
+            # stream() — guaranteed via finally rather than duplicated at
+            # the end of each branch above, so a future new exit path can't
+            # forget it and leak the lock until its TTL.
+            await CreditService.release_turn_lock(user_id)

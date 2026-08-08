@@ -1,10 +1,10 @@
 """
 LangSmithService — attaches real, backend-computed per-turn cost to the
-corresponding LangSmith trace.
+corresponding LangSmith trace as feedback.
 
 Tracing itself stays fully automatic (LANGCHAIN_TRACING_V2 env var, no manual
 SDK calls anywhere else in this codebase) — this is the one place that talks
-to the LangSmith SDK directly, and only to patch cost onto a run that's
+to the LangSmith SDK directly, and only to attach cost onto a run that's
 already being traced. Needed because OmniRoute reports $0 for every call
 through the "antigravity" provider pool, so LangSmith's own cost display is
 useless for this model; the real number is computed in chat_service.py from
@@ -13,9 +13,25 @@ actual token counts × config/model_config.py's price table.
 chat_service.py passes run_id=uuid.UUID(turn_id) into the graph invocation's
 RunnableConfig, so the turn's already-minted turn_id IS the LangSmith root
 run's ID — no second id to track.
+
+IMPORTANT — verified live, not assumed: this uses Client.create_feedback(),
+NOT Client.update_run(). update_run() was the original design and looked
+correct from the SDK signature alone, but a live test against a real run
+proved it fails in exactly the scenario this feature needs: LangGraph's own
+tracer already sends a completion update when the graph finishes (that's
+what makes the run show up as "done" in the UI at all), and LangSmith
+rejects a second update_run() on an already-completed run with
+"409 Conflict: Run update payload already received. Duplicate run update
+requests for the same run are not supported." Every real production
+attempt to attach cost via update_run() would hit this and silently fail
+(swallowed by the try/except below) — the run would just never show cost.
+create_feedback() is what LangSmith actually provides for exactly this
+case — a separate, post-hoc annotation linked to a run_id that doesn't
+touch the run record itself, so it can't conflict with the tracer's own
+lifecycle. Confirmed live: shows up on read-back immediately (no
+batching/ingestion delay, unlike the run record itself).
 """
 import asyncio
-from typing import Optional
 
 import structlog
 logger = structlog.get_logger(__name__)
@@ -23,9 +39,9 @@ logger = structlog.get_logger(__name__)
 _client = None  # lazily constructed, reused — mirrors graph/llm_registry.py's client-caching convention
 
 ATTACH_RETRIES = 3
-ATTACH_RETRY_DELAY_S = 2.0  # LangSmith's run ingestion is async/batched — the
-                            # run may not exist yet immediately after the
-                            # turn finishes, so a couple short retries.
+ATTACH_RETRY_DELAY_S = 2.0  # the run record itself can lag LangSmith's ingestion
+                            # (its own tracer update is async/batched); the run must
+                            # exist server-side before feedback can attach to it.
 
 
 def _get_client():
@@ -52,14 +68,15 @@ class LangSmithService:
             try:
                 client = _get_client()
                 await asyncio.to_thread(
-                    client.update_run,
-                    run_id,
-                    extra={"metadata": {
-                        "cost_usd": round(cost_usd, 8),
+                    client.create_feedback,
+                    run_id=run_id,
+                    key="cost_usd",
+                    value=round(cost_usd, 8),
+                    extra={
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
                         "model": model,
-                    }},
+                    },
                 )
                 return
             except Exception as e:

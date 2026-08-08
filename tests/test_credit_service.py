@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from services.credit_service import CreditService, DEFAULT_CREDIT_CAP_USD
+from services.credit_service import CreditService, DEFAULT_CREDIT_CAP_USD, TURN_LOCK_TTL_SECONDS
 
 
 @pytest.mark.asyncio
@@ -131,10 +131,67 @@ async def test_record_and_deduct_updates_redis_best_effort():
 
 @pytest.mark.asyncio
 async def test_record_and_deduct_mongo_failure_does_not_touch_redis():
-    """If the durable write fails, don't let the cache silently drift ahead of it."""
+    """If the durable write fails (even after retries), don't let the cache
+    silently drift ahead of it. max_retries=1 here just to keep the test
+    fast — the retry behavior itself is covered separately below."""
     mock_redis = AsyncMock()
     with patch("services.credit_service.users_collection") as mock_users, \
          patch("services.credit_service.get_redis", AsyncMock(return_value=mock_redis)):
         mock_users.update_one = AsyncMock(side_effect=RuntimeError("mongo down"))
-        await CreditService.record_and_deduct("507f1f77bcf86cd799439011", 1.5)  # must not raise
+        await CreditService.record_and_deduct("507f1f77bcf86cd799439011", 1.5, max_retries=1)  # must not raise
+        mock_redis.incrbyfloat.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_record_and_deduct_retries_and_recovers_from_transient_failure():
+    """A transient Mongo blip shouldn't permanently lose that turn's cost —
+    this is what the retry loop exists for."""
+    mock_redis = AsyncMock()
+    with patch("services.credit_service.users_collection") as mock_users, \
+         patch("services.credit_service.get_redis", AsyncMock(return_value=mock_redis)), \
+         patch("asyncio.sleep", AsyncMock()):  # don't actually wait during the test
+        mock_users.update_one = AsyncMock(side_effect=[RuntimeError("transient"), None])
+        await CreditService.record_and_deduct("507f1f77bcf86cd799439011", 2.0, max_retries=3)
+        assert mock_users.update_one.await_count == 2  # failed once, succeeded on retry
+        mock_redis.incrbyfloat.assert_awaited_once()  # only after the durable write actually succeeded
+
+
+@pytest.mark.asyncio
+async def test_acquire_turn_lock_succeeds_when_free():
+    mock_redis = AsyncMock()
+    mock_redis.set = AsyncMock(return_value=True)
+    with patch("services.credit_service.get_redis", AsyncMock(return_value=mock_redis)):
+        acquired = await CreditService.acquire_turn_lock("507f1f77bcf86cd799439011")
+        assert acquired is True
+        mock_redis.set.assert_awaited_once_with(
+            "active_turn_lock:507f1f77bcf86cd799439011", "1", nx=True, ex=TURN_LOCK_TTL_SECONDS
+        )
+
+
+@pytest.mark.asyncio
+async def test_acquire_turn_lock_fails_when_already_held():
+    """This is the actual race-condition fix: SET NX returning None means
+    another turn for this user is already in flight — reject the new one."""
+    mock_redis = AsyncMock()
+    mock_redis.set = AsyncMock(return_value=None)
+    with patch("services.credit_service.get_redis", AsyncMock(return_value=mock_redis)):
+        acquired = await CreditService.acquire_turn_lock("507f1f77bcf86cd799439011")
+        assert acquired is False
+
+
+@pytest.mark.asyncio
+async def test_acquire_turn_lock_fails_open_when_redis_unavailable():
+    """Redis being down shouldn't take down chat entirely — has_credit()'s
+    own Mongo fallback still enforces the real cap either way."""
+    with patch("services.credit_service.get_redis", AsyncMock(return_value=None)):
+        acquired = await CreditService.acquire_turn_lock("507f1f77bcf86cd799439011")
+        assert acquired is True
+
+
+@pytest.mark.asyncio
+async def test_release_turn_lock_deletes_the_key():
+    mock_redis = AsyncMock()
+    with patch("services.credit_service.get_redis", AsyncMock(return_value=mock_redis)):
+        await CreditService.release_turn_lock("507f1f77bcf86cd799439011")
+        mock_redis.delete.assert_awaited_once_with("active_turn_lock:507f1f77bcf86cd799439011")
         mock_redis.incrbyfloat.assert_not_called()
