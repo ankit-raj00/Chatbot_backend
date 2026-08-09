@@ -15,33 +15,18 @@ class PromptBuilder:
 
     @staticmethod
     def build_core_system_prompt(enabled_tools: list[str]) -> str:
-        """Build the core system prompt based on which tools are enabled."""
-        tools_desc = ""
-
-        if "search_knowledge_base" in enabled_tools:
-            tools_desc += (
-                "- **search_knowledge_base**: Search file contents the user has selected. "
-                "ALWAYS use this if the user asks about their files, resume, or documents.\n"
-                "- **read_document_page**: Read a specific page if search results are truncated.\n"
-            )
-
-        if "list_google_drive_folders" in enabled_tools or "create_google_drive_folder" in enabled_tools:
-            tools_desc += "- Manage Drive files using the Google Drive tools.\n"
-
-        core = (
-            "You are AgentX, a powerful AI assistant with access to tools, a Knowledge Base, and memory.\n\n"
-        )
-        if tools_desc:
-            core += f"### YOUR TOOLS:\n{tools_desc}\n"
-
-        core += (
-            "### INSTRUCTIONS:\n"
-            "1. Always check your available tools before refusing a request.\n"
-            "2. If the user selects context files, use `search_knowledge_base` first.\n"
-            "3. Combine tool outputs for comprehensive answers.\n"
-            "4. If you encounter an error, explain it clearly.\n"
-        )
-        return core
+        """Historically built a "You are AgentX..." identity + tools + generic
+        instructions block. Removed (2026-08-09): this SystemMessage is always
+        merged with agent_node.py's AGENT_SYSTEM_PROMPT (see its
+        _with_system_prompt), which already opens with its own identity
+        statement and covers search_knowledge_base far more correctly and
+        completely (including the "knowledge-base documents are NOT sandbox
+        files" distinction this block never had). Measured: ~148 tokens of
+        pure duplication, sent on every single LLM call within every turn
+        (agent_node runs once per ReAct round-trip, not once per turn) of
+        every conversation — cut with zero loss, verified against the same
+        test suite this function's callers are covered by."""
+        return ""
 
     @staticmethod
     def build_mcp_context_section(
