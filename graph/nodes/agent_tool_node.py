@@ -316,6 +316,7 @@ async def agent_tool_node(state: ChatState, config: RunnableConfig) -> dict:
     tool_calls = getattr(last_message, "tool_calls", []) or []
     configurable = config.get("configurable", {})
     user_id = configurable.get("user_id", "")
+    conversation_id = configurable.get("thread_id", "")
     turn_id = configurable.get("turn_id", "")
     model_name = configurable.get("model") or DEFAULT_MODEL
 
@@ -385,8 +386,9 @@ async def agent_tool_node(state: ChatState, config: RunnableConfig) -> dict:
                     if key in _FORCED_KEYS or key not in args:
                         args[key] = val
 
-        # Hooks (same as native_tool_node)
-        hook_result = await run_pre_tool_hooks(name, args, user_id)
+        # Hooks — includes the centralized sandbox path/command guard
+        # (utils/hooks.py's _sandbox_guard_hook), not just logging.
+        hook_result = await run_pre_tool_hooks(name, args, user_id, conversation_id)
         if hook_result and hook_result.get("deny"):
             return ToolMessage(
                 content=f"Tool call blocked: {hook_result.get('reason','blocked by hook')}",

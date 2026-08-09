@@ -25,9 +25,10 @@ from langchain_core.tools import StructuredTool
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
-from utils.workspace import conversation_workspace_for, is_path_within_conversation_sandbox
+from utils.workspace import conversation_workspace_for
 from config.model_config import ModelConfig
 from utils import sandbox_client
+from utils.hooks import check_sandbox_path
 
 # Long-edge cap — images larger than this are downscaled before the vision call
 # to keep the request small/fast (this is well within typical vision limits and
@@ -83,8 +84,10 @@ def make_analyze_image_tool(user_id: str, conversation_id: str):
 
         Returns a text description/answer, not the raw image.
         """
-        if not is_path_within_conversation_sandbox(user_id, conversation_id, sandbox_path):
-            return "BLOCKED: path outside sandbox"
+        # Centralized in utils/hooks.py (Tier 2.3) — same reasoning as run_shell.py.
+        block_reason = check_sandbox_path("analyze_image", {"sandbox_path": sandbox_path}, user_id, conversation_id)
+        if block_reason:
+            return f"BLOCKED: {block_reason}"
 
         target = (ws_root / sandbox_path).resolve() if not Path(sandbox_path).is_absolute() else Path(sandbox_path).resolve()
 
