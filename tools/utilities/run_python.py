@@ -14,6 +14,7 @@ from langchain_core.tools import tool
 from langchain_core.callbacks import adispatch_custom_event
 from utils.workspace import conversation_workspace_for, venv_python_for, pip_cache_dir_for, is_path_within_conversation_sandbox
 from utils.code_executor import stream_python, sandbox_env, _sandbox_user_kwargs
+from utils import sandbox_client
 
 _TIMEOUT = 300  # seconds
 
@@ -89,6 +90,47 @@ async def _auto_install_and_retry_streaming(code: str, error: str, cwd: str, use
     return f"[Auto-installed missing package and retried]\n{joined}"
 
 
+async def _auto_install_and_retry_remote(code: str, error: str, user_id: str,
+                                          conversation_id: str,
+                                          filename: str | None) -> str | None:
+    """Remote-mode twin of _auto_install_and_retry_streaming. The local-file
+    check is skipped deliberately: the workspace lives on the sandbox host, so
+    the equivalent lookup would need another round-trip for a rare case — a
+    genuinely-missing package still installs correctly, and a local-file
+    collision just surfaces the original ImportError instead of a nicer hint."""
+    if "No module named" not in error:
+        return None
+    try:
+        pkg_raw = error.split("No module named '")[1].split("'")[0].split(".")[0]
+        pkg_map = {"fpdf": "fpdf2", "docx": "python-docx", "pptx": "python-pptx", "bs4": "beautifulsoup4"}
+        pkg = pkg_map.get(pkg_raw, pkg_raw)
+    except IndexError:
+        return None
+
+    install_lines = []
+    install_code = -1
+    async for item in sandbox_client.pip_install_remote(user_id, conversation_id, pkg):
+        if "line" in item:
+            install_lines.append(item["line"])
+        elif item.get("done"):
+            install_code = item.get("exit_code", -1)
+    if install_code != 0:
+        return (f"Failed to auto-install '{pkg}' (exit {install_code}): "
+                f"{chr(10).join(install_lines)[-500:]}")
+
+    lines = []
+    async for item in sandbox_client.stream_python_remote(
+            user_id, conversation_id, code, filename, _TIMEOUT):
+        if "line" in item:
+            lines.append(item["line"])
+            await adispatch_custom_event(
+                "exec_output",
+                {"tool": "run_python", "line": item["line"], "stream": item["stream"]},
+            )
+    joined = "\n".join(lines) or "(no output)"
+    return f"[Auto-installed missing package and retried]\n{joined}"
+
+
 def make_run_python_tool(user_id: str, conversation_id: str):
     """
     Factory: returns a run_python tool bound to a specific user's workspace.
@@ -129,18 +171,24 @@ def make_run_python_tool(user_id: str, conversation_id: str):
                 the run. Strongly recommended for anything you might need to
                 iterate on.
         """
-        # Resolve (and lazily build) the per-user venv off the event loop.
-        python_executable = str(await asyncio.to_thread(venv_python_for, user_id))
+        if filename and not is_path_within_conversation_sandbox(user_id, conversation_id, filename):
+            return "BLOCKED: filename path outside sandbox"
 
-        script_path = None
-        if filename:
-            if not is_path_within_conversation_sandbox(user_id, conversation_id, filename):
-                return "BLOCKED: filename path outside sandbox"
-            script_path = str(Path(cwd) / filename)
+        if sandbox_client.is_remote():
+            # Remote mode: SES owns the venv and the workspace, so there's no
+            # local venv to resolve and no local script path to compute.
+            stream = sandbox_client.stream_python_remote(
+                user_id, conversation_id, code, filename or None, _TIMEOUT)
+        else:
+            # Resolve (and lazily build) the per-user venv off the event loop.
+            python_executable = str(await asyncio.to_thread(venv_python_for, user_id))
+            script_path = str(Path(cwd) / filename) if filename else None
+            stream = stream_python(code, cwd, timeout=_TIMEOUT,
+                                   python_executable=python_executable,
+                                   script_path=script_path)
 
         lines = []
-        async for item in stream_python(code, cwd, timeout=_TIMEOUT, python_executable=python_executable,
-                                         script_path=script_path):
+        async for item in stream:
             if "line" in item:
                 lines.append(item["line"])
                 await adispatch_custom_event(
@@ -150,7 +198,12 @@ def make_run_python_tool(user_id: str, conversation_id: str):
 
         output = "\n".join(lines) or "(no output)"
         if "ModuleNotFoundError" in output or "No module named" in output:
-            retry = await _auto_install_and_retry_streaming(code, output, cwd, user_id, script_path)
+            if sandbox_client.is_remote():
+                retry = await _auto_install_and_retry_remote(
+                    code, output, user_id, conversation_id, filename or None)
+            else:
+                script_path = str(Path(cwd) / filename) if filename else None
+                retry = await _auto_install_and_retry_streaming(code, output, cwd, user_id, script_path)
             if retry is not None:
                 return retry
         if filename:

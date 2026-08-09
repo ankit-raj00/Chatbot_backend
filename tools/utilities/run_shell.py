@@ -9,6 +9,7 @@ from langchain_core.tools import tool
 from langchain_core.callbacks import adispatch_custom_event
 from utils.workspace import conversation_workspace_for, is_path_within_conversation_sandbox, pip_cache_dir_for, npm_prefix_for
 from utils.code_executor import stream_shell, sandbox_env
+from utils import sandbox_client
 
 BLOCKED_PATTERNS = [
     "rm -rf /", "rm -rf ~", "sudo rm", ":(){:|:&};:", "mkfs",
@@ -87,20 +88,31 @@ def make_run_shell_tool(user_id: str, conversation_id: str):
                         or not is_path_within_conversation_sandbox(user_id, conversation_id, target)):
                     return "BLOCKED: cannot change directory outside the sandbox"
 
-        # Prepare isolated environment. SECURITY: build off sandbox_env()'s safe
-        # allowlist, never {**os.environ} — the backend's real environment holds
-        # every service credential (QDRANT_API_KEY, MONGO_URI, GOOGLE_API_KEY,
-        # JWT_SECRET_KEY, ...) and sandboxed user code must never be able to read
-        # them (this was a confirmed exploitable leak — see code_executor.py).
-        npm_prefix = npm_prefix_for(user_id)
-        env = sandbox_env({
-            "PIP_CACHE_DIR": str(pip_cache_dir_for(user_id)),
-            "NPM_CONFIG_PREFIX": str(npm_prefix),
-        })
-        env["PATH"] = f"{npm_prefix / 'bin'}{os.pathsep}{env.get('PATH', '')}"
+        if sandbox_client.is_remote():
+            # The blocked-pattern check still runs here (above/below) rather than
+            # only on SES: it returns a clear message without paying a network
+            # round-trip, and the container's own limits remain the real control.
+            cl = command.lower()
+            if any(b in cl for b in BLOCKED_PATTERNS):
+                return "BLOCKED: command contains a forbidden pattern"
+            stream = sandbox_client.stream_shell_remote(user_id, conversation_id, command, 120)
+        else:
+            # Prepare isolated environment. SECURITY: build off sandbox_env()'s safe
+            # allowlist, never {**os.environ} — the backend's real environment holds
+            # every service credential (QDRANT_API_KEY, MONGO_URI, GOOGLE_API_KEY,
+            # JWT_SECRET_KEY, ...) and sandboxed user code must never be able to read
+            # them (this was a confirmed exploitable leak — see code_executor.py).
+            npm_prefix = npm_prefix_for(user_id)
+            env = sandbox_env({
+                "PIP_CACHE_DIR": str(pip_cache_dir_for(user_id)),
+                "NPM_CONFIG_PREFIX": str(npm_prefix),
+            })
+            env["PATH"] = f"{npm_prefix / 'bin'}{os.pathsep}{env.get('PATH', '')}"
+            stream = stream_shell(command, cwd, timeout=120,
+                                  blocked_patterns=BLOCKED_PATTERNS, env=env)
 
         lines = []
-        async for item in stream_shell(command, cwd, timeout=120, blocked_patterns=BLOCKED_PATTERNS, env=env):
+        async for item in stream:
             if "line" in item:
                 lines.append(item["line"])
                 await adispatch_custom_event(
