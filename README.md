@@ -1,73 +1,51 @@
-# AgentX Backend — Complete Technical Documentation
+# AgentX Backend — Technical Documentation
 
-> **Production-grade Agentic AI Backend** | FastAPI · LangGraph · Google Gemini · Qdrant · MongoDB · Redis · MCP
-> 
-> **New**: Dual-layer observability (LangSmith trace + native cost analytics), Admin Dashboard with real per-token cost tracking
-
-> ## ⚠️ Correction (2026-08-04) — parts of this document describe a decommissioned architecture
-> This is a large, detailed doc and a full rewrite risks introducing errors in sections that weren't
-> touched tonight — treat the below as authoritative corrections layered on top, not a claim that
-> everything else here is still accurate. For the current, actively-maintained source of truth on
-> architecture, see **`CLAUDE.md`** at the repo root; for the latest session's changes specifically,
-> see **`SESSION_HANDOFF.md`**.
+> **Agentic AI Backend** | FastAPI · LangGraph · Google Gemini (via OmniRoute) · Qdrant · MongoDB · Redis · MCP
 >
-> Specifically **stale** in the sections below:
-> - **Deployment target**: "designed to run on Render/Vercel" is out of date — the backend now runs
->   on a self-hosted AWS EC2 box (Docker + nginx + Let's Encrypt), deployed manually via SSH
->   (no CI/CD). See `SESSION_HANDOFF.md` for the exact deploy process.
-> - **The chat graph**: `native_tool_node` / `mcp_tool_node` as separate LangGraph nodes describes an
->   earlier "supervisor + subgraphs" design. The current graph (`graph/builder.py`) is a **single
->   two-node ReAct agent** (`agent_node` ↔ `agent_tool_node`) that handles native tools, MCP tools,
->   and a sandboxed code-execution environment (`run_python`/`run_shell`/`edit_file`/`analyze_image`)
->   itself, plus an on-demand "skills" system (markdown manuals loaded via `list_skills`/`load_skill`).
->   None of that sandbox/skills system is documented anywhere in this file yet.
-> - **Model & pricing** (`Section 12`): `gemini-2.5-flash` at `$0.075`/`$0.30` per 1M tokens is the
->   *previous* generation. The model is currently served through **OmniRoute** (an OpenAI-compatible
->   LLM gateway) as `antigravity/gemini-3.5-flash-medium` — and that specific provider channel
->   reports **$0.00 cost on every call** (verified empirically), since it's backed by pooled free
->   Google accounts rather than a billed API key. `config/model_config.py`'s pricing constants are
->   being updated to reflect Gemini 3.5 Flash's real published rate ($1.50/$9.00 per 1M tokens) for
->   accounting purposes even though nothing is actually billed today — see `SESSION_HANDOFF.md` for
->   the in-progress credit/cost-tracking system this feeds into.
-> - **Streaming architecture**: as of tonight, `ChatService.stream()` no longer directly drives the
->   agent inline with the HTTP response — see `services/turn_manager.py` and `SESSION_HANDOFF.md`
->   item #2. A page reload/disconnect no longer kills an in-progress generation.
+> Single ReAct agent with a real sandbox, on-demand skills, a free-tier credit system, and generation
+> decoupled from the HTTP connection that started it.
 
 ---
 
 ## Table of Contents
 1. [Project Overview](#1-project-overview)
 2. [Architecture Overview](#2-architecture-overview)
-3. [Complete Directory Structure](#3-complete-directory-structure)
+3. [Directory Structure](#3-directory-structure)
 4. [Application Startup & Lifecycle](#4-application-startup--lifecycle)
 5. [API Routes Reference](#5-api-routes-reference)
-6. [The Chat Pipeline (Agentic Conversation Flow)](#6-the-chat-pipeline-agentic-conversation-flow)
-7. [The Agentic RAG Pipeline](#7-the-agentic-rag-pipeline)
-8. [Model Context Protocol (MCP) Integration](#8-model-context-protocol-mcp-integration)
-9. [Persistent Memory Bank](#9-persistent-memory-bank)
-10. [Redis: Caching, Rate-Limiting & Background Jobs](#10-redis-caching-rate-limiting--background-jobs)
-11. [Authentication & Security](#11-authentication--security)
-12. [Dual-Layer Observability: LangSmith + Native Cost Analytics](#12-dual-layer-observability-langsmith--native-cost-analytics)
-13. [Admin Analytics Dashboard](#13-admin-analytics-dashboard)
-14. [Hook System (Middleware for Tool Calls)](#14-hook-system-middleware-for-tool-calls)
-15. [Database Schema (MongoDB)](#15-database-schema-mongodb)
-16. [Environment Variables Reference](#16-environment-variables-reference)
-17. [Running Locally & E2E Testing](#17-running-locally--e2e-testing)
+6. [The Chat Pipeline (Agent Turn, Start to Finish)](#6-the-chat-pipeline-agent-turn-start-to-finish)
+7. [Turn Lifecycle: Decoupled from the HTTP Request](#7-turn-lifecycle-decoupled-from-the-http-request)
+8. [The Sandbox & Remote Execution](#8-the-sandbox--remote-execution)
+9. [Security Guardrails (Centralized Hooks)](#9-security-guardrails-centralized-hooks)
+10. [Free-Tier Credit System](#10-free-tier-credit-system)
+11. [Context Engineering: Memory Bank + Cross-Turn Summarization](#11-context-engineering-memory-bank--cross-turn-summarization)
+12. [Skills System](#12-skills-system)
+13. [The Agentic RAG Pipeline](#13-the-agentic-rag-pipeline)
+14. [Model Context Protocol (MCP) Integration](#14-model-context-protocol-mcp-integration)
+15. [Redis: Caching, Rate-Limiting & Background Jobs](#15-redis-caching-rate-limiting--background-jobs)
+16. [Authentication & Security](#16-authentication--security)
+17. [Observability: LangSmith + Native Cost Analytics](#17-observability-langsmith--native-cost-analytics)
+18. [Admin Analytics Dashboard](#18-admin-analytics-dashboard)
+19. [Database Schema (MongoDB)](#19-database-schema-mongodb)
+20. [Infrastructure & Deployment](#20-infrastructure--deployment)
+21. [Environment Variables Reference](#21-environment-variables-reference)
+22. [Running Locally & Testing](#22-running-locally--testing)
 
 ---
 
 ## 1. Project Overview
 
-AgentX is not a simple chatbot — it is a full **Agentic AI Workspace** built on a multi-phase, production-grade backend architecture. The backend orchestrates:
+AgentX is an agentic AI workspace: a **single ReAct agent** (not a supervisor routing between subgraphs)
+with its own Python sandbox, a shell, a skills library it loads on demand, document retrieval, optional
+MCP tool connections, and a persistent memory of the user — given a task and left to actually do the work,
+streaming every step back to the client as it happens.
 
-- **Stateful, streaming conversations** via a LangGraph state machine
-- **Agentic RAG**: Self-correcting document retrieval with hallucination detection
-- **External Tool Use**: Connecting to real-world services via the Model Context Protocol (MCP)
-- **Long-term Memory**: Silently learning and storing user facts across sessions
-- **Asynchronous Background Processing**: Non-blocking PDF ingestion queue with real-time job polling
-- **Enterprise Hardening**: Rate limiting, correlation-ID logging, distributed caching, and health probes
-
-The system is designed to run on Render/Vercel in production and gracefully degrade when optional services (Redis) are unavailable in local development.
+Distinctive engineering choices covered in this document:
+- **Generation isn't tied to the HTTP request that started it** — closing the tab doesn't stop the agent (§7)
+- **Code execution runs on a separate, gVisor-sandboxed host**, not as a subprocess in the app container, fail-closed if unreachable (§8)
+- **Security and cost are enforced centrally**, not copy-pasted per tool (§9, §10)
+- **Context is compacted, not truncated** — a long conversation's older messages are summarized, not dropped (§11)
+- **Two purpose-built EC2 boxes and a tests-gate-every-deploy CI/CD pipeline**, not a container orchestration platform (§20)
 
 ---
 
@@ -81,975 +59,616 @@ graph TD
 
     subgraph fastapi_app [FastAPI Application]
         MW["Middleware Stack\n(CORS · Logging · Rate-Limit · Correlation-ID)"]
-        ROUTES["API Routers\n(Auth · Chat · RAG · Ingest · MCP · Tools · User)"]
+        ROUTES["API Routers\n(Auth · Chat · RAG · Ingest · MCP · Tools · User · Admin)"]
     end
 
     subgraph chat_pipeline [Chat Pipeline]
-        CC["ChatController\n(HTTP Layer)"]
-        CS["ChatService\n(Orchestrator)"]
-        HS["HistoryService\n(Redis Cache → MongoDB)"]
-        PB["PromptBuilder\n(Dynamic System Prompt)"]
-        MS["MemoryService\n(Background Extraction)"]
-        CG["LangGraph: Chat Graph"]
+        CC["ChatController"]
+        CS["ChatService.stream()\n(fast sync setup, then spawns the turn)"]
+        TM["turn_manager\n(in-process registry, fans out to N viewers)"]
+        HS["HistoryService\n(Redis-cached, most-recent 30)"]
+        CSS["ConversationSummaryService\n(batched cross-turn summary)"]
+        PB["PromptBuilder"]
+        CRED["CreditService\n(pre-turn cap check + turn lock)"]
+        MS["MemoryService\n(background extraction)"]
     end
 
-    subgraph chat_nodes [Chat Graph Nodes]
-        SN["setup_node\n(Load History + Memory)"]
-        CM["chat_model_node\n(Gemini LLM + Dynamic Tools)"]
-        RT{"route_tools\nConditional Router"}
-        NTN["native_tool_node\n(Internal Python Tools)"]
-        MTN["mcp_tool_node\n(External MCP Servers)"]
+    subgraph graph_v3 [Graph Builder v3 — single ReAct agent]
+        AN["agent_node\n(binds tools, calls the LLM)"]
+        ATN["agent_tool_node\n(runs every tool call in parallel,\nhooks + timer + result cache)"]
     end
 
-    subgraph rag_pipeline [RAG Pipeline]
-        RW["RAG Workflow\n(LangGraph)"]
-        PRN["parallel_retrieve_node\n(Qdrant + Tavily concurrently)"]
-        GN["grade_documents\n(Relevance Grader)"]
-        AN["agent_node\n(Agentic Reasoning Loop)"]
-        HN["hallucination_node\n(Groundedness Check)"]
+    subgraph sandbox [Sandbox]
+        HOOKS["utils/hooks.py\npre-tool guardrail"]
+        LOCAL["local subprocess\n(SANDBOX_EXECUTOR_MODE=local)"]
+        REMOTE["gVisor container on a\ndedicated sandbox host\n(SANDBOX_EXECUTOR_MODE=remote)"]
     end
 
     subgraph storage [Storage]
-        MONGO[("MongoDB\n(Atlas)\nUsers · Chats · Memory")]
-        QDRANT[("Qdrant Cloud\nVector DB")]
-        REDIS[("Redis\n(Upstash)\nCache · Jobs · Rate-Limit")]
+        MONGO[("MongoDB Atlas\nusers · conversations · messages")]
+        QDRANT[("Qdrant\nvector store")]
+        REDIS[("Redis\ncache · jobs · rate-limit · checkpoints")]
     end
 
     subgraph external [External Services]
-        GEMINI["Google Gemini\n(LLM + Embeddings)"]
-        LLAMA["LlamaParse Cloud\n(PDF Parsing)"]
-        TAVILY["Tavily\n(Web Search)"]
-        MCP_SERVER["MCP Servers\n(Google Drive, Filesystem, etc.)"]
+        OMNI["OmniRoute\n(LLM gateway) → Gemini"]
+        LLAMA["LlamaParse\n(PDF parsing)"]
+        TAVILY["Tavily\n(web search)"]
+        MCP_SERVER["MCP Servers\n(Google Drive, Filesystem, ...)"]
     end
 
-    FE -->|"HTTP/SSE"| MW
-    MW --> ROUTES
-    ROUTES --> CC
-    CC --> CS
-    CS --> HS
+    FE -->|"HTTP/SSE"| MW --> ROUTES --> CC --> CS
+    CS -->|"detached asyncio.Task"| TM
+    TM --> AN
+    CS -.->|"attaches as first viewer"| TM
+    CS --> CRED
+    CS --> HS --> REDIS
+    CS --> CSS --> MONGO
     CS --> PB
-    CS --> CG
-    CG --> SN --> CM --> RT
-    RT -->|Tool Call| NTN
-    RT -->|MCP Call| MTN
-    RT -->|Text Response| FE
-    NTN --> CM
-    MTN --> CM
-    MTN --> MCP_SERVER
-    CS -->|asyncio.create_task| MS
-    MS --> MONGO
-
-    ROUTES --> RW
-    RW --> PRN
-    PRN -->|"asyncio.gather"| QDRANT
-    PRN -->|"asyncio.gather"| TAVILY
-    PRN --> GN --> AN --> HN
-
-    HS --> REDIS
+    AN <-->|"tool_calls / observations, looped"| ATN
+    ATN --> HOOKS
+    ATN -->|local mode| LOCAL
+    ATN -->|remote mode| REMOTE
+    AN --> OMNI --> GEMINI["Google Gemini"]
+    ATN -->|"knowledge_base_search"| QDRANT
+    ATN -->|"web search"| TAVILY
+    ATN -->|"MCP tool call"| MCP_SERVER
+    CS -->|"spawn(), non-blocking"| MS --> MONGO
     HS --> MONGO
-    CM --> GEMINI
-    PRN --> GEMINI
-    AN --> GEMINI
-    HN --> GEMINI
 ```
+
+This is **"Graph Builder v3"** — it replaced an earlier supervisor-plus-7-subgraphs design that routed
+between specialized graphs via an intent classifier. The current graph (`graph/builder.py`) compiles to
+just two nodes: `agent_node` → (conditional) → `agent_tool_node` → back to `agent_node` → `END`.
+`agent_node` assembles one flat tool list every turn — always-on sandbox tools, skill discovery, the
+user's enabled native tools, and live MCP tools — and binds them to Gemini. `agent_tool_node` rebuilds
+the identical tool map to execute the calls in parallel via `asyncio.gather`.
 
 ---
 
-## 3. Complete Directory Structure
+## 3. Directory Structure
 
 ```text
 backend/
-├── main.py                    # FastAPI app, middleware stack, lifespan
+├── main.py                        # FastAPI app, middleware stack, lifespan
 │
-├── routes/                    # API endpoint definitions (thin HTTP layer only)
-│   ├── auth_routes.py         # POST /auth/signup, /auth/login, /auth/logout, GET /auth/me
-│   ├── chat_routes.py         # POST /chat/stream (SSE)
-│   ├── conversation_routes.py # GET/DELETE /conversations, GET /conversations/{id}/messages
-│   ├── upload_routes.py       # POST /api/v1/ingest/upload, GET /api/v1/ingest/job/{id}
-│   ├── rag_routes.py          # POST /api/v1/rag/chat, /api/v1/rag/retrieve, GET /api/v1/rag/files
-│   ├── mcp_server_routes.py   # GET/POST/DELETE /api/mcp/servers
-│   ├── tool_routes.py         # GET /api/tools, PUT /api/tools/{id}/toggle
-│   ├── user_routes.py         # GET/DELETE /api/users/memories
-│   ├── admin_routes.py        # GET /admin/* — 7 cost analytics endpoints (admin-only)
-│   ├── oauth_routes.py        # Google OAuth flow endpoints
-│   └── auth_status_routes.py  # GET /api/auth/status
+├── routes/                        # Thin HTTP layer — delegates to controllers
+│   ├── auth_routes.py             # /auth/signup, /login, /logout, /me
+│   ├── chat_routes.py             # /chat/stream, /stream/multimodal,
+│   │                               #   /{id}/active-turn, /{id}/resume, /{id}/stop
+│   ├── conversation_routes.py     # /conversations CRUD
+│   ├── upload_routes.py           # /api/v1/ingest/upload, /job/{id}, /jobs
+│   ├── rag_routes.py              # /api/v1/rag/chat, /retrieve, /files
+│   ├── mcp_server_routes.py       # /api/mcp/servers CRUD
+│   ├── tool_routes.py             # /api/tools, toggle per-user native tools
+│   ├── skill_vault_routes.py      # user-uploaded skills CRUD
+│   ├── user_routes.py             # memories, credits (/api/users/credits)
+│   ├── admin_routes.py            # cost analytics, admin-only
+│   ├── oauth_routes.py            # Google Drive OAuth + generic MCP OAuth 2.1 callback
+│   ├── parser_routes.py           # proxies to the standalone PDF parser microservice
+│   ├── output_routes.py           # serves sandbox-generated files back to the client
+│   └── agent_routes.py            # misc agent introspection endpoints
 │
-├── controllers/               # Request parsing + delegation to services
-│   ├── auth_controller.py     # JWT creation, cookie setting, user lookup
-│   └── chat_controller.py     # Cloudinary upload handling, SSE response wrapping
+├── controllers/                   # Request parsing + delegation to services
+│   ├── chat_controller.py
+│   ├── user_controller.py
+│   └── google_oauth_controller.py
 │
-├── services/                  # Business logic (the heavy lifting)
-│   ├── chat_service.py        # Main streaming orchestrator (8-step pipeline)
-│   ├── history_service.py     # Redis-cached conversation history
-│   ├── prompt_builder.py      # Dynamic system prompt assembly
-│   ├── memory_service.py      # Long-term memory extraction (Google ADK-style)
-│   └── ingestion_job_service.py # Redis-backed job queue for PDF ingestion
+├── services/                      # Business logic
+│   ├── chat_service.py            # ChatService.stream() — the orchestrator (see §6)
+│   ├── turn_manager.py            # detached-task registry, fans out to N viewers (see §7)
+│   ├── history_service.py         # Redis-cached, most-recent-30 conversation history
+│   ├── conversation_summary_service.py  # cross-turn compaction (see §11)
+│   ├── prompt_builder.py          # assembles the full system prompt from all sections
+│   ├── memory_service.py          # durable user-fact extraction (see §11)
+│   ├── credit_service.py          # free-tier cap + turn concurrency lock (see §10)
+│   ├── langsmith_service.py       # attaches real cost onto the LangSmith trace
+│   ├── ingestion_job_service.py   # Redis-backed job queue for document ingestion
+│   └── universal_file_reader.py   # native multimodal file reading for sandbox_read_file_natively
 │
-├── graph/                     # LangGraph Chat Graph
-│   ├── builder.py             # Assembles + compiles the StateGraph
-│   ├── router.py              # Conditional edge: text vs. tool call
-│   ├── llm_registry.py        # Singleton cache of Gemini LLM instances
-│   ├── nodes/
-│   │   ├── common.py          # ChatState TypedDict schema
-│   │   ├── setup_node.py      # Loads history + memories into state
-│   │   ├── native_tool_node.py # Executes Python tools (with hooks + timer)
-│   │   └── mcp_tool_node.py   # Proxies calls to MCP servers (with hooks + timer)
+├── graph/                         # LangGraph — Graph Builder v3 (see §2)
+│   ├── builder.py                 # compiles the 2-node StateGraph
+│   ├── llm_registry.py            # singleton cache of LLM client instances
+│   └── nodes/
+│       ├── common.py               # AgentState TypedDict
+│       ├── agent_node.py           # assembles tools, binds to the LLM, invokes
+│       └── agent_tool_node.py      # executes every tool call in parallel
 │
-├── rag/                       # Agentic RAG System
-│   ├── ingestion_service.py   # Orchestrates document → chunk → embed pipeline
-│   ├── graph/
-│   │   ├── workflow.py        # RAGWorkflow: the LangGraph RAG state machine
-│   │   ├── state.py           # RAGGraphState TypedDict
-│   │   └── nodes/
-│   │       ├── retrieval_node.py    # parallel_retrieve_node (Qdrant + Tavily)
-│   │       ├── grader_node.py       # LLM-based document relevance grader
-│   │       ├── agent_node.py        # Reasoning + tool-use loop (AgentNode)
-│   │       └── hallucination_node.py # Groundedness verification
-│   ├── parsers/
-│   │   └── llama_parse_client.py   # LlamaParse API wrapper (advanced PDF parsing)
-│   ├── tools/
-│   │   └── retrieval_tool.py       # search_knowledge_base @tool (used by AgentNode)
-│   └── vector_store/
-│       └── qdrant_manager.py       # Qdrant CRUD: upsert, search, delete, index
+├── rag/                            # Agentic RAG (see §13)
+│   ├── ingestion_service.py
+│   ├── graph/workflow.py           # Qdrant + Tavily in parallel, grade, agent, verify
+│   ├── parsers/llama_parse_client.py
+│   ├── chunking/splitter_factory.py
+│   └── vector_store/qdrant_manager.py
 │
-├── core/                      # Infrastructure & cross-cutting concerns
-│   ├── database.py            # Motor (async MongoDB) client + collection references
-│   ├── auth.py                # JWT encode/decode, password hashing (bcrypt)
-│   ├── middleware.py          # get_current_user dependency (cookie + header auth)
-│   ├── cache.py               # Async Redis pool + cache_set/get/delete with fallback
-│   ├── limiter.py             # slowapi Limiter (Redis-backed or in-memory fallback)
-│   ├── logging_config.py      # structlog JSON processor chain configuration
-│   └── request_context.py     # CorrelationIdMiddleware (injects X-Request-ID)
+├── skills/                         # Progressive-disclosure skills system (see §12)
+│   ├── skill_loader.py
+│   └── builtin/<name>/SKILL.md     # markdown manuals, YAML frontmatter
 │
-├── tools/                     # Native tool definitions (@tool decorated functions)
-│   ├── __init__.py            # AVAILABLE_TOOLS registry + get_all_tools()
-│   ├── search_tool.py         # Tavily web search tool
-│   ├── file_tool.py           # Local file read tool
-│   └── ...                    # Other native tools (dice, time, weather, etc.)
+├── tools/
+│   ├── __init__.py                 # AVAILABLE_TOOLS registry
+│   └── utilities/
+│       ├── run_python.py           # sandbox_run_python
+│       ├── run_shell.py            # sandbox_run_shell
+│       ├── edit_file.py            # sandbox_edit_file
+│       ├── analyze_image.py        # sandbox_analyze_image
+│       ├── read_file_natively.py   # sandbox_read_file_natively
+│       └── ...                     # web search, weather, dice, MCP resource reads
 │
-├── utils/                     # Utilities
-│   ├── mcp_connection_manager.py # Singleton MCPConnectionManager (SSE + HTTP + stdio)
-│   └── hooks.py               # Decorator-based pre/post tool call hook system
+├── core/                           # Cross-cutting infrastructure
+│   ├── database.py                 # Motor (async MongoDB) client + collections
+│   ├── auth.py                     # JWT encode/decode, bcrypt
+│   ├── middleware.py                # get_current_user dependency
+│   ├── cache.py                     # async Redis pool, in-memory fallback
+│   ├── limiter.py                   # slowapi rate limiting
+│   └── logging_config.py            # structlog JSON processor chain
 │
-└── models/                    # Pydantic schemas
-    ├── user.py                # UserCreate, UserLogin, UserResponse (with is_admin field)
-    └── ...
-
-### Admin-specific files
-```text
-backend/
-├── routes/admin_routes.py     # 7 analytics endpoints (GET /admin/*)
-│                              # Protected by require_admin() dependency
-│                              # Aggregates cost/token data from MongoDB
-└── create_admin.py            # One-time script to promote a user to admin
+├── utils/
+│   ├── hooks.py                     # centralized pre/post-tool guardrail hooks (see §9)
+│   ├── sandbox_client.py            # gVisor remote-execution client (see §8)
+│   ├── mcp_connection_manager.py    # MCP server connections, 5-min tool cache
+│   └── workspace.py                 # per-user, per-conversation sandbox path resolution
+│
+└── models/                          # Pydantic schemas
 ```
 
 ---
 
 ## 4. Application Startup & Lifecycle
 
-The FastAPI lifespan context manager (`main.py`) runs a structured initialization sequence every time the application starts:
-
 ```mermaid
 sequenceDiagram
     participant U as Uvicorn
     participant APP as FastAPI Lifespan
-    participant REDIS as Redis (Upstash)
-    participant MONGO as MongoDB (Atlas)
-    participant QDRANT as Qdrant Cloud
-    participant LS as LangSmith
+    participant REDIS as Redis
+    participant MONGO as MongoDB
+    participant AGENT as Agent Graph
 
     U->>APP: startup
     APP->>REDIS: init_redis() — connect pool, ping
-    Note over REDIS: Falls back to in-memory if unavailable
-    APP->>MONGO: ensure_indexes() — messages, conversations, users
-    APP->>MONGO: Register native tools (upsert to tools_collection)
-    APP->>LS: Check LANGCHAIN_TRACING_V2 env var
-    APP-->>U: yield (app is LIVE)
-    Note over U: Handles all HTTP traffic
-    U->>APP: shutdown signal
+    Note over REDIS: Non-fatal — falls back to in-memory if unreachable
+    APP->>MONGO: ensure_indexes()
+    APP->>MONGO: register native tools (tools_collection)
+    APP->>AGENT: warm up the compiled graph
+    APP-->>U: yield (LIVE)
+    Note over U: Handles traffic; a background loop reaps idle sandbox workspaces
+    U->>APP: shutdown
     APP->>APP: mcp_manager.disconnect_all()
+    APP->>APP: close the checkpointer
     APP->>REDIS: close_redis()
 ```
 
-### What happens on startup:
-
-| Step | What it Does | Failure Behavior |
-|------|-------------|-----------------|
-| `init_redis()` | Creates async connection pool to Upstash/local Redis | **Non-fatal** — falls back to in-memory dict |
-| `ensure_indexes()` | Creates MongoDB indexes on `conversation_id`, `user_id`, `email` | **Non-fatal** — warns and continues |
-| Tool Registration | Upserts all native tools into `tools_collection` | **Non-fatal** — warns and continues |
-| LangSmith Check | Reads `LANGCHAIN_TRACING_V2` env var | Informational only |
-
-### Middleware Stack (applied bottom-to-top by FastAPI):
-
-```
-Request enters →
-  1. CorrelationIdMiddleware   — Injects X-Request-ID into every request
-  2. LoggingMiddleware (ASGI)  — Records method, path, status, duration_ms
-  3. SlowAPIMiddleware         — Rate-limit enforcement (Redis or in-memory)
-  4. CORSMiddleware            — Validates Origin against ALLOWED_ORIGINS env var
-  → Route Handler
-```
+Checkpointing is Redis-backed (`langgraph-checkpoint-redis`) when `REDIS_URL` is set, else an in-memory
+`MemorySaver` — the app runs fully without Redis, only distributed features degrade.
 
 ---
 
 ## 5. API Routes Reference
 
-### Standard Routes
-
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/` | ❌ | Root health ping |
 | GET | `/health` | ❌ | Deep health check (MongoDB, Redis, Qdrant) |
-| POST | `/auth/signup` | ❌ | Register new user, sets JWT cookie |
-| POST | `/auth/login` | ❌ | Authenticate, sets JWT cookie |
-| POST | `/auth/logout` | ❌ | Clears JWT cookie |
-| GET | `/auth/me` | ✅ | Returns current user info (includes `is_admin`) |
-| POST | `/chat/stream` | ✅ | **Main Chat SSE endpoint** (rate-limited: 20/min) |
-| GET | `/conversations` | ✅ | List user's conversations |
-| GET | `/conversations/{id}/messages` | ✅ | Get messages in a conversation |
-| DELETE | `/conversations/{id}` | ✅ | Delete a conversation + its messages |
-| POST | `/api/v1/ingest/upload` | ✅ | Upload PDF for ingestion (rate-limited: 5/min) |
-| GET | `/api/v1/ingest/job/{job_id}` | ✅ | Poll ingestion job status |
-| POST | `/api/v1/rag/chat` | ✅ | Agentic RAG chat endpoint |
-| POST | `/api/v1/rag/retrieve` | ✅ | Raw vector retrieval (debugging) |
-| GET | `/api/v1/rag/files` | ✅ | List ingested files for current user |
-| DELETE | `/api/v1/rag/file/{file_id}` | ✅ | Delete an ingested file from Qdrant |
-| GET | `/api/mcp/servers` | ✅ | List registered MCP servers |
-| POST | `/api/mcp/servers` | ✅ | Register a new MCP server |
-| DELETE | `/api/mcp/servers/{id}` | ✅ | Unregister an MCP server |
-| GET | `/api/tools` | ✅ | List all available tools |
-| PUT | `/api/tools/{id}/toggle` | ✅ | Enable/disable a native tool |
-| GET | `/api/users/memories` | ✅ | Get user's persistent memories |
-| DELETE | `/api/users/memories` | ✅ | Clear all user memories |
+| POST | `/auth/signup` / `/login` / `/logout` | ❌ | JWT cookie auth |
+| GET | `/auth/me` | ✅ | Current user, includes `is_admin` |
+| POST | `/chat/stream` | ✅ | Main SSE endpoint — spawns a detached turn (§7) |
+| POST | `/chat/stream/multimodal` | ✅ | Same, with file/image attachments |
+| GET | `/chat/{id}/active-turn` | ✅ | Cheap check: is a turn currently running? |
+| GET | `/chat/{id}/resume` | ✅ | Attach as a new viewer to an in-flight or just-finished turn |
+| POST | `/chat/{id}/stop` | ✅ | Actually cancels the background task |
+| GET/DELETE | `/conversations` | ✅ | Conversation CRUD |
+| POST | `/api/v1/ingest/upload` | ✅ | Upload a document — returns a `job_id` immediately |
+| GET | `/api/v1/ingest/job/{id}` / `/jobs` | ✅ | Poll one job, or list this user's recent jobs |
+| POST | `/api/v1/rag/chat` | ✅ | Agentic RAG chat |
+| GET | `/api/v1/rag/files` | ✅ | List ingested files |
+| GET/POST/DELETE | `/api/mcp/servers` | ✅ | MCP server registration |
+| GET/PUT | `/api/tools` | ✅ | List / toggle native tools |
+| GET/DELETE | `/api/users/memories` | ✅ | Memory bank |
+| GET | `/api/users/credits` | ✅ | Current user's own spend vs. free-tier cap |
+| GET | `/oauth/google/authorize` / `/callback` | ✅ / ❌ | Google Drive OAuth |
+| GET | `/oauth/mcp/callback` | ❌ | Generic MCP server OAuth 2.1 callback |
 
-### Admin Routes (`is_admin: true` required)
+### Admin routes (`is_admin: true` required, else HTTP 403)
 
 | Method | Path | Description |
-|--------|------|-------------|
+|---|---|---|
 | GET | `/admin/overview` | Platform-wide totals: users, messages, tokens, cost |
-| GET | `/admin/users` | Paginated user list with per-user token & cost aggregates |
-| GET | `/admin/users/{user_id}/sessions` | All conversations for a user with per-session cost |
-| GET | `/admin/users/{user_id}/sessions/{conv_id}` | Turn-by-turn detail with per-message token counts |
-| GET | `/admin/usage/daily` | AI response volume + cost per day (last 30 days) |
-| GET | `/admin/usage/models` | Token & cost breakdown per Gemini model variant |
-| GET | `/admin/usage/tools` | Tool call frequency ranking |
-
-> ⚠️ Admin routes return **HTTP 403** for non-admin users. Promote a user via MongoDB:
-> ```js
-> db.users.updateOne({ email: "you@example.com" }, { $set: { is_admin: true } })
-> ```
+| GET | `/admin/users` | Per-user token & cost aggregates |
+| GET | `/admin/users/{id}/sessions` | Per-session cost for one user |
+| GET | `/admin/users/{id}/sessions/{conv_id}` | Turn-by-turn token/cost detail |
+| GET | `/admin/usage/daily` / `/usage/models` / `/usage/tools` | Time-series and breakdown analytics |
 
 ---
 
-## 6. The Chat Pipeline (Agentic Conversation Flow)
+## 6. The Chat Pipeline (Agent Turn, Start to Finish)
 
-Every message sent to `POST /chat/stream` triggers an 8-step pipeline inside `ChatService.stream()`. The endpoint returns a **Server-Sent Events (SSE)** stream — the AI's response is streamed token-by-token to the client in real time.
+`ChatService.stream()` does fast synchronous setup, then hands the actual work off to a detached
+background task (see §7) — it does **not** drive the agent inline with the HTTP response.
 
 ```mermaid
 sequenceDiagram
     participant FE as Frontend
-    participant CC as ChatController
-    participant CS as ChatService
-    participant HS as HistoryService
-    participant PB as PromptBuilder
-    participant MS as MemoryService
-    participant CG as Chat Graph (LangGraph)
-    participant GEMINI as Gemini LLM
+    participant CS as ChatService.stream()
+    participant CRED as CreditService
     participant MONGO as MongoDB
-    participant REDIS as Redis
+    participant TM as turn_manager
+    participant AN as agent_node
+    participant ATN as agent_tool_node
+    participant OMNI as OmniRoute → Gemini
 
-    FE->>CC: POST /chat/stream {message, model, tools...}
-    CC->>CS: ChatService.stream(...)
+    FE->>CS: POST /chat/stream
+    CS->>CRED: has_credit(user)? acquire_turn_lock(user)?
+    Note over CS: Pre-turn hard block if the free-tier cap is already exceeded
+    CS->>MONGO: Step 1-2: upsert conversation, save user message
+    CS->>TM: spawn _run_turn() as a detached asyncio.Task
+    CS-->>TM: attach as the turn's first viewer
+    Note over CS,TM: Everything below runs inside the background task
 
-    CS->>MONGO: Step 1: Upsert conversation (create if new)
-    CS->>MONGO: Step 2: Insert user message
-    CS->>CS: Step 3: Connect requested MCP servers
-    CS->>REDIS: Step 4: HistoryService.get_history() (cache lookup)
-    REDIS-->>CS: HIT: return cached history
-    MONGO-->>CS: MISS: query MongoDB, cache in Redis
-    CS->>MONGO: Step 4b: Fetch user memories
-    CS->>PB: Step 5: Build system prompt (tools + memories + MCP context)
-    CS->>CG: Step 6: astream_events(graph_input)
-    
-    loop LangGraph Agent Loop
-        CG->>GEMINI: ainvoke(messages)
-        GEMINI-->>CG: AI response (text or tool_call)
-        alt Tool Call Requested
-            CG->>CG: native_tool_node / mcp_tool_node
-            CG->>CS: on_tool_start SSE event
-            CG->>CS: on_tool_end SSE event
-            CG->>GEMINI: Re-invoke with tool result
-        else Text Response
-            CG->>CS: on_chat_model_stream SSE events
-            CS-->>FE: data chunk... streamed
+    par Context assembly (Steps 4-6)
+        TM->>MONGO: HistoryService — most recent 30 messages (Redis-cached)
+        TM->>MONGO: ConversationSummaryService.get_summary()
+        TM->>TM: PromptBuilder.assemble(core + summary + memory + mcp)
+    end
+
+    TM->>AN: astream_events(graph_input, version="v2")
+    loop until no tool calls remain
+        AN->>OMNI: ainvoke(messages, tools bound)
+        OMNI-->>AN: text or tool_call(s)
+        alt tool call(s)
+            AN->>ATN: run every call in parallel (asyncio.gather)
+            ATN-->>AN: results appended, loop back
+        else text
+            AN-->>TM: token stream
+            TM-->>FE: SSE chunk (fanned out to every attached viewer)
         end
     end
 
-    CS->>MONGO: Step 8a: Save AI response + tool_steps + input_tokens + output_tokens + cost_usd + model
-    CS->>MS: Step 8b: asyncio.create_task(extract_and_store) — NON-BLOCKING
-    CS->>REDIS: Step 8c: Invalidate history cache
-    CS-->>FE: data done true, conversation_id
+    TM->>MONGO: Step 8: save AI response + tokens + cost_usd
+    TM->>CRED: spawn record_and_deduct() — non-blocking
+    TM->>TM: spawn MemoryService.extract_and_store() — non-blocking
+    TM->>TM: spawn ConversationSummaryService.maybe_update_summary() — non-blocking
+    TM-->>FE: done
 ```
 
 ### SSE Event Format
 
-The frontend receives a stream of JSON-encoded SSE events:
+| Event | Meaning |
+|-------|---------|
+| `chunk` | A token of the response |
+| `status` | e.g. "Using tool: sandbox_run_python" |
+| `tool_call` / `tool_output` | Invocation details / result |
+| `stopped` | The turn was cancelled (via `/stop` or the credit grace cutoff) |
+| `done` | Stream complete |
+| `error` | Includes `error_code` for specific cases (e.g. `credit_limit_reached`) |
 
-| Event | Payload | Meaning |
-|-------|---------|---------|
-| `chunk` | `{"chunk": "Hello"}` | A token of the LLM's text response |
-| `status` | `{"status": "Using tool: tavily_search"}` | LLM is calling a tool |
-| `tool_call` | `{"tool_call": {"name": "...", "args": {...}}}` | Tool invocation details |
-| `tool_output` | `{"tool_output": {"name": "...", "result": "..."}}` | Tool execution result |
-| `done` | `{"done": true, "conversation_id": "..."}` | Stream complete |
-| `error` | `{"error": "..."}` | An error occurred |
+---
 
-### The LangGraph Chat State Machine
+## 7. Turn Lifecycle: Decoupled from the HTTP Request
 
-```mermaid
-stateDiagram-v2
-    [*] --> setup_node
-    setup_node --> chat_model: history + memories loaded
-    chat_model --> route_tools: LLM response received
+A closed tab or a page refresh does **not** stop the agent. `ChatService.stream()` spawns `_run_turn()`
+as a **detached `asyncio.Task`** and attaches its own SSE response as that task's first "viewer" —
+`services/turn_manager.py` is an in-process registry that fans a running turn's events out to any
+number of subscriber queues, and replays everything already published to a viewer that attaches late.
 
-    state route_tools {
-        [*] --> check_response
-        check_response --> has_text: text only
-        check_response --> has_native_tool: native tool call
-        check_response --> has_mcp_tool: MCP tool call
-    }
+- **`GET /chat/{id}/resume`** — attaches a new viewer (page reload, a second tab): replays every event
+  published so far, then continues streaming live. This is the same mechanism used for the original
+  request; there's no special "resume" code path in the agent itself.
+- **`GET /chat/{id}/active-turn`** — a cheap check the frontend calls before deciding whether to resume.
+- **`POST /chat/{id}/stop`** — actually cancels the background task. The old "abort the fetch to stop
+  generation" trick no longer reaches the agent, since generation isn't tied to any one request.
 
-    route_tools --> END: has_text
-    route_tools --> native_tool_node: has_native_tool
-    route_tools --> mcp_tool_node: has_mcp_tool
+This is single-process/in-memory by design, matching the current single-container deployment — if the
+server process itself dies, the turn dies with it, same as any in-flight request would.
 
-    native_tool_node --> chat_model: tool result appended
-    mcp_tool_node --> chat_model: tool result appended
+---
+
+## 8. The Sandbox & Remote Execution
+
+Every user gets a persistent workspace under `WORKSPACE_ROOT` with a lazily-created Python venv, shared
+across their conversations. `uploads/`, `outputs/`, and `work/` are scoped **one level deeper, per
+conversation** — `is_path_within_conversation_sandbox()` guards against escaping the sandbox root,
+including escaping into a *different* conversation's folder for the same user. This isolation is
+load-bearing, not cosmetic: file-creation detection works by snapshotting `outputs/` before a turn and
+diffing mtimes after, and a shared-per-user (not per-conversation) directory let one conversation's file
+write land inside a *different, concurrent* conversation's snapshot window — confirmed live before the fix.
+
+### Execution mode
+
+`SANDBOX_EXECUTOR_MODE` controls where code actually runs:
+
+- **`local`** (default) — `sandbox_run_python`/`sandbox_run_shell` execute as a subprocess in the app's
+  own container, under a dedicated non-root UID with `--cap-drop=ALL` and only `SETUID`/`SETGID`/
+  `CHOWN`/`DAC_OVERRIDE` added back.
+- **`remote`** — code is streamed to a **separate, network-isolated host** and executed inside a
+  **gVisor container** per execution (`utils/sandbox_client.py`). This is genuinely a different machine,
+  not just a different process — kernel-level isolation, not a subprocess boundary. **Fail-closed by
+  design**: if the sandbox host is unreachable, the tool call returns an explicit error; it never
+  silently falls back to running the code locally.
+
+---
+
+## 9. Security Guardrails (Centralized Hooks)
+
+`utils/hooks.py` is a single, centralized pre-tool guardrail — every sandbox tool call passes through it
+before executing, instead of each tool re-implementing its own checks:
+
+- **`check_sandbox_path()`** — resolves the target path against the calling conversation's sandbox root
+  and rejects anything that tries to climb out (`sandbox_run_python`, `sandbox_edit_file`,
+  `sandbox_analyze_image`).
+- **`check_run_shell_command()`** — rejects destructive shell patterns (`rm -rf /`, fork bombs, disk
+  wipes) before the shell ever sees them.
+- Registered as a `pre_tool_hook` that `agent_tool_node.py` runs ahead of every tool execution, with
+  `conversation_id` threaded through so path checks are scoped correctly.
+
+Every tool call is also wrapped in a `ToolTimer` and passes through a result cache
+(`utils/tool_result_cache.py`) to avoid redundant work within a turn.
+
+---
+
+## 10. Free-Tier Credit System
+
+`services/credit_service.py` tracks real per-turn spend (computed from actual token counts, not
+estimates) against a per-user free-tier cap.
+
+- **Cap**: `credit_cap_usd` on the user document, defaulting to `DEFAULT_CREDIT_CAP_USD` ($5.00) if
+  absent — deliberately per-user so a future paid tier can just raise it on that one account.
+- **Grace buffer**: `CREDIT_GRACE_USD` ($1.00) — a turn already in flight is allowed to finish into the
+  grace zone rather than being cut off mid-answer; it's the *next* turn that actually gets blocked.
+- **Pre-turn hard block**: `has_credit()` is checked before a turn is allowed to start; if exceeded, the
+  client gets an SSE `error` event with `error_code: "credit_limit_reached"` and no turn is created.
+- **Mid-turn cutoff**: inside the token-accumulation loop, running spend is checked against
+  `cap + GRACE` on every LLM call; if crossed, the task is cancelled (reusing the same
+  `asyncio.CancelledError` handling that already persists partial content and emits a `stopped` event).
+- **Concurrency guard**: `acquire_turn_lock()` (Redis `SET NX`) allows only one in-flight turn per user,
+  closing a race where several parallel turns could each pass `has_credit()` before any of them deducts.
+- **Admins are exempt from enforcement but not accounting** — `has_credit()` always returns `True` for
+  `is_admin` users, and the mid-turn cutoff is skipped for them too, but `record_and_deduct()` still runs
+  identically, so spend is tracked for every account regardless.
+- **Deduction**: `record_and_deduct()` runs as a non-blocking background task after a turn completes
+  (including a stopped one), retried a few times against MongoDB `$inc` since losing this write would
+  silently undercharge a completed turn.
+
+Real pricing lives in `config/model_config.py` — the default model
+(`antigravity/gemini-3.5-flash-medium`, served through OmniRoute) is priced at `$1.50` / `$9.00` per 1M
+input/output tokens.
+
+---
+
+## 11. Context Engineering: Memory Bank + Cross-Turn Summarization
+
+Two complementary systems keep the agent's context both personalized and complete, without letting the
+prompt grow unbounded.
+
+### Memory Bank (`services/memory_service.py`)
+
+After each turn, a background task extracts durable facts — name, stack, projects, preferences — and
+merges them into the user's `user_memories` document. `PromptBuilder` folds the latest ~10 back into the
+system prompt at the start of every turn, so a brand-new conversation already knows who it's talking to.
+
+### Cross-turn summarization (`services/conversation_summary_service.py`)
+
+`HistoryService` only ever sends the model the most recent 30 messages — correct (a fixed 2026-08-09
+bug used to return the *oldest* 30 instead), but not unlimited. What ages out of that window isn't
+simply dropped:
+
+- Every time a full **batch of 10** newly-aged-out messages accumulates, they're folded into a running,
+  **300-word-capped** summary via a background LLM call — batched deliberately, so a long conversation
+  pays for one compact summarization call per ~10 messages, not one per turn.
+- The summary is injected into the system prompt as its own section ("Earlier in this conversation —
+  summarized"), separate from the raw recent-30 window.
+- This directly follows Anthropic's published context-engineering guidance: prefer **compaction** over
+  hard truncation, so what falls out of the raw window is remembered as a summary rather than forgotten
+  outright.
+
+---
+
+## 12. Skills System
+
+Markdown manuals (YAML frontmatter + body) the agent discovers and loads on demand — mirrors Anthropic's
+Claude Skills model, so the system prompt stays small and behavior stays specific.
+
+- **Level 1 (cheap)**: `list_skills()` returns only name + description for every built-in
+  (`skills/builtin/<name>/SKILL.md`) and user-uploaded (MongoDB `user_skills_collection`) skill.
+- **Level 2 (full body)**: `load_skill(name)` fetches the complete manual, only when the agent decides a
+  task needs it.
+- `get_relevant_skill_for_message()` does trigger-word matching for auto-suggestion.
+
+---
+
+## 13. The Agentic RAG Pipeline
+
+A separate, self-contained LangGraph workflow (`rag/graph/workflow.py`) for document-grounded Q&A —
+Qdrant vector search and Tavily web search run **in parallel** (`asyncio.gather(..., return_exceptions=True)`)
+so one failing source never sinks retrieval, followed by relevance grading, an agentic answer loop that
+can call `search_knowledge_base` again if needed, and a groundedness check before returning.
+
+Ingestion is asynchronous: `POST /api/v1/ingest/upload` returns a `job_id` immediately;
+`IngestionJobService` tracks state in Redis (24h TTL) while a background task parses (LlamaParse, tables
+and images preserved), chunks, embeds, and upserts into Qdrant. The frontend polls `GET /job/{id}` or
+`GET /jobs` for a persistent "what's happening with my uploads" view.
+
+---
+
+## 14. Model Context Protocol (MCP) Integration
+
+`utils/mcp_connection_manager.py` is a singleton managing connections to external MCP servers over
+**stdio**, **SSE**, or **Streamable HTTP**. Tool discovery is cached with a **5-minute TTL** per server
+so the agent doesn't pay a network round-trip on every turn. Auth is either **OAuth 2.1** (automatic
+authorization-server discovery + PKCE) or a plain API-key header, and every connection is isolated per
+user. Discovered tools are converted to LangChain `StructuredTool` objects and land in `agent_node`'s
+flat tool list the same turn they're connected — no redeploy required.
+
+---
+
+## 15. Redis: Caching, Rate-Limiting & Background Jobs
+
+| Use | Detail |
+|---|---|
+| Conversation history cache | Key `history:{conversation_id}:{user_id}`, 5-min TTL, invalidated after every turn |
+| LangGraph checkpointing | `langgraph-checkpoint-redis` when `REDIS_URL` is set, else in-memory `MemorySaver` |
+| Rate limiting | `slowapi`, Redis-backed with in-memory fallback |
+| Ingestion job state | JSON, 24h TTL |
+| Credit spend cache | Read-through cache over the Mongo source of truth, 1h TTL |
+| Turn concurrency lock | `SET NX`, self-healing TTL as a safety net if a process dies mid-turn |
+
+**Graceful degradation**: if Redis is unreachable, `core/cache.py` falls back to an in-memory dict and
+`core/limiter.py` falls back to `slowapi`'s in-memory backend — the app starts and works fully; only
+multi-instance features degrade.
+
+---
+
+## 16. Authentication & Security
+
+JWT (`HS256`) in an `HttpOnly` cookie — `secure=True` + `samesite="none"` in production,
+`secure=False` + `samesite="lax"` in development, controlled by `ENVIRONMENT`. Passwords hashed with
+`bcrypt`. `get_current_user` reads the cookie first, falling back to an `Authorization: Bearer` header.
+
+---
+
+## 17. Observability: LangSmith + Native Cost Analytics
+
+Two layers, running simultaneously:
+
+- **LangSmith** (`LANGCHAIN_TRACING_V2=true`) — full trace, visual graph, latency per node. The turn's
+  `run_id` is set explicitly to the same UUID already used for `turn_manager` tracking, so
+  `services/langsmith_service.py` can attach the real computed `cost_usd`/token counts onto the
+  corresponding trace after the fact (retried a few times, since LangSmith's ingestion is async and can
+  race the attach call).
+- **Native tracking** (the source of truth) — `astream_events(version="v2")`, filtered on
+  `on_chat_model_end` with `metadata.langgraph_node` populated, so token counts aren't double-counted
+  across tool-call loops. Stored permanently on the message document and fed into both the admin
+  dashboard and the credit system.
+
+---
+
+## 18. Admin Analytics Dashboard
+
+`/admin/*` routes require `is_admin: true` on the user document (`403` otherwise — promote via
+`python create_admin.py` or directly in MongoDB). Drill-down hierarchy:
+
+```
+/admin  →  /admin/users  →  /admin/users/{id}/sessions  →  /admin/users/{id}/sessions/{conv_id}
+overview   per-user cost    per-session cost for one user   turn-by-turn token/cost detail
 ```
 
 ---
 
-## 7. The Agentic RAG Pipeline
+## 19. Database Schema (MongoDB)
 
-The RAG system is a separate, self-contained LangGraph workflow designed to handle document-grounded Q&A. It lives in `rag/graph/` and is called from `POST /api/v1/rag/chat`.
-
-### The 5-Node RAG State Machine
-
-```mermaid
-stateDiagram-v2
-    [*] --> parallel_retrieve
-    
-    parallel_retrieve --> grade_documents: Qdrant results + Tavily results merged
-    
-    grade_documents --> agent: All docs evaluated
-    
-    note right of grade_documents
-        Each document scored:
-        relevant / not relevant
-        by gemini-2.5-flash-lite
-    end note
-    
-    agent --> hallucination_check: Answer generated
-    
-    note right of agent
-        Agentic loop:
-        LLM can call search_knowledge_base
-        tool multiple times to gather
-        more context before answering
-    end note
-    
-    hallucination_check --> END: Always returns answer
-    
-    note right of hallucination_check
-        If grounded → hallucination_warning=False
-        If not grounded → hallucination_warning=True
-        (No retry to avoid rate-limit cascades)
-    end note
-```
-
-### Step-by-Step RAG Flow
-
-```mermaid
-sequenceDiagram
-    participant CLIENT as Client
-    participant RR as RAG Route
-    participant RW as RAG Workflow
-    participant PRN as parallel_retrieve_node
-    participant QDRANT as Qdrant
-    participant TAVILY as Tavily Web
-    participant GN as grade_documents
-    participant AN as agent_node
-    participant TOOL as search_knowledge_base Tool
-    participant GEMINI as Gemini LLM
-    participant HN as hallucination_node
-
-    CLIENT->>RR: POST /api/v1/rag/chat question, selected_files
-    RR->>RW: workflow.app.ainvoke question
-
-    par Parallel Retrieval
-        RW->>PRN: asyncio.gather(...)
-        PRN->>QDRANT: similarity_search(question, k=5, filter=user_id)
-        PRN->>TAVILY: search(question)
-    end
-    PRN->>RW: merged unique documents
-
-    RW->>GN: grade all retrieved documents
-    loop For each document
-        GN->>GEMINI: "Is this relevant to the question? yes/no"
-        GEMINI-->>GN: relevance score
-    end
-    GN->>RW: filtered relevant documents
-
-    RW->>AN: generate answer with relevant docs
-    loop Agent Reasoning (can loop)
-        AN->>GEMINI: ainvoke(docs + question)
-        GEMINI->>TOOL: search_knowledge_base(query="...")
-        TOOL->>QDRANT: similarity_search(query, k=5)
-        QDRANT-->>TOOL: chunks
-        TOOL-->>GEMINI: results
-        GEMINI-->>AN: final answer text
-    end
-
-    RW->>HN: check if answer is grounded
-    HN->>GEMINI: "Is this answer supported by these docs? yes/no"
-    GEMINI-->>HN: grounded / not grounded
-    HN->>RW: final state (hallucination_warning: bool)
-
-    RW-->>RR: generation, documents, hallucination_warning
-    RR-->>CLIENT: answer, sources, hallucination_warning
-```
-
-### Ingestion Pipeline (Background Queue)
-
-When a file is uploaded, ingestion is asynchronous — the API returns instantly with a `job_id`, and processing happens in a FastAPI `BackgroundTask`.
-
-```mermaid
-sequenceDiagram
-    participant FE as Frontend
-    participant UPR as /upload Route
-    participant BG as BackgroundTask
-    participant IJS as IngestionJobService
-    participant IS as IngestionService
-    participant LP as LlamaParse
-    participant EMBED as Gemini Embeddings
-    participant QDRANT as Qdrant
-
-    FE->>UPR: POST /api/v1/ingest/upload (file)
-    UPR->>IJS: create_job(filename, user_id) → job_id
-    UPR->>BG: add_task(_run_ingestion_background)
-    UPR-->>FE: 200 job_id, status queued -- INSTANT RESPONSE
-
-    Note over BG: Running asynchronously in background
-
-    BG->>IJS: update_job(status="parsing")
-    BG->>IS: process_upload_from_path(file_path)
-    IS->>LP: LlamaParse.aload_data(file) — Cloud API
-    LP-->>IS: parsed Document objects (markdown)
-    IS->>IS: Semantic Chunking (split by headers + size)
-    BG->>IJS: update_job(status="embedding")
-    IS->>EMBED: embed_documents(chunks)
-    EMBED-->>IS: float32 vectors
-    IS->>QDRANT: upsert(vectors + metadata)
-    BG->>IJS: update_job(status="complete", file_id=..., chunks=N)
-
-    FE->>UPR: GET /api/v1/ingest/job/{job_id} (polling)
-    UPR->>IJS: get_job(job_id)
-    IJS-->>UPR: status, chunks_count, file_id
-    UPR-->>FE: job status
-```
-
----
-
-## 8. Model Context Protocol (MCP) Integration
-
-AgentX implements the open-source [Model Context Protocol](https://modelcontextprotocol.io/) to connect Gemini to external services in real-time.
-
-### How It Works
-
-```mermaid
-graph LR
-    subgraph agentx [AgentX Backend]
-        CM["chat_model_node\n(Gemini LLM)"]
-        MCPMgr["MCPConnectionManager\n(Singleton)"]
-        CACHE["Tool Cache\n(5-min TTL)"]
-        MTN["mcp_tool_node"]
-    end
-
-    subgraph external [MCP Servers External]
-        GD["Google Drive MCP Server\n(SSE/HTTP)"]
-        FS["File System MCP Server\n(stdio)"]
-        CUSTOM["Custom MCP Server\n(HTTP/SSE)"]
-    end
-
-    CM -->|"get_all_langchain_tools()"| MCPMgr
-    MCPMgr --> CACHE
-    MCPMgr -->|"MultiServerMCPClient"| GD
-    MCPMgr -->|"MultiServerMCPClient"| FS
-    MCPMgr -->|"MultiServerMCPClient"| CUSTOM
-    CM -->|"StructuredTool call"| MTN
-    MTN -->|"Proxy tool execution"| MCPMgr
-    MCPMgr -->|"Execute on server"| GD
-```
-
-### MCP Architecture Details
-
-- **`MCPConnectionManager`** is a **singleton** (`__new__` pattern) — only one instance exists per process.
-- **Tool Discovery Caching**: `get_all_langchain_tools()` caches discovered tools for **5 minutes** per server URL, preventing expensive SSE network calls on every chat turn.
-- **Adapter Pattern**: Raw MCP tool definitions are converted into **LangChain `StructuredTool` objects** so the LLM can invoke them with full schema validation.
-- **Transport Support**: Supports **HTTP**, **SSE**, and **stdio** transports, auto-detected from the URL format.
-- **Lifecycle**: All connections are gracefully closed on application shutdown via `mcp_manager.disconnect_all()`.
-
----
-
-## 9. Persistent Memory Bank
-
-Inspired by Google ADK's Memory Bank pattern, AgentX silently extracts and stores facts about users to personalize future sessions.
-
-```mermaid
-sequenceDiagram
-    participant CS as ChatService
-    participant MS as MemoryService
-    participant GEMINI as gemini-2.5-flash-lite
-    participant MONGO as MongoDB (user_memories)
-    participant PB as PromptBuilder
-
-    Note over CS: After each AI response is saved...
-    CS->>MS: asyncio.create_task(extract_and_store(...))
-    Note over CS: NON-BLOCKING — chat stream continues
-
-    MS->>GEMINI: Extract durable facts from this conversation...
-    GEMINI-->>MS: topic tech stack, content Uses FastAPI
-    MS->>MONGO: upsert user_id, memories -- merge with existing
-
-    Note over PB: At the START of every chat turn...
-    CS->>MONGO: MemoryService.get_user_memories(user_id)
-    MONGO-->>CS: topic, content...
-    CS->>PB: assemble user_memories
-    PB->>PB: Inject memories into System Prompt
-```
-
-### Memory Schema (MongoDB `user_memories` collection)
+### `users`
 ```json
 {
-  "user_id": "64abc123...",
-  "memories": [
-    {"topic": "tech stack", "content": "Uses Python, FastAPI, and MongoDB", "created_at": "..."},
-    {"topic": "project", "content": "Building an AI agent platform called AgentX", "updated_at": "..."}
-  ],
-  "updated_at": "2026-01-14T12:00:00Z"
+  "_id": "ObjectId", "email": "...", "name": "...", "password": "bcrypt hash",
+  "is_admin": false,
+  "credits_used_usd": 0.42, "credit_cap_usd": 5.0
 }
 ```
 
-**Key Design Decisions:**
-- **Why MongoDB, not Redis?** Memories are permanent — they must survive Redis flushes or server restarts.
-- **Why LLM extraction?** Rule-based extraction misses implicit facts. The LLM understands context and nuance.
-- **Why cap at 10 memories?** More than 10 makes the system prompt too long and dilutes the LLM's attention.
-- **Why `gemini-2.5-flash-lite`?** Cheapest model, fastest, and the extraction task is simple enough for it.
-
----
-
-## 10. Redis: Caching, Rate-Limiting & Background Jobs
-
-Redis (Upstash) serves three critical functions:
-
-### 10.1 Conversation History Cache (`HistoryService`)
-```mermaid
-flowchart TD
-    A["ChatService requests history"] --> B{Redis cache hit?}
-    B -->|HIT| C["Return cached list[BaseMessage]"]
-    B -->|MISS| D["Query MongoDB messages_collection"]
-    D --> E["Format as LangChain messages"]
-    E --> F["cache_set(key, messages, ttl=300s)"]
-    F --> C
-    G["After AI responds"] --> H["HistoryService.invalidate(conversation_id)"]
-    H --> I["cache_delete(key)"]
-```
-
-- Cache key: `history:{conversation_id}:{user_id}`
-- TTL: **5 minutes** (300 seconds)
-- Invalidated immediately after each conversation turn completes
-
-### 10.2 Rate Limiting (`slowapi`)
-- `POST /chat/stream`: **20 requests per minute** per IP
-- `POST /api/v1/ingest/upload`: **5 requests per minute** per IP
-- Counts are stored in Redis atomically; falls back to in-memory on Redis failure
-
-### 10.3 Ingestion Job Queue (`IngestionJobService`)
-- Job state stored as JSON with a **24-hour TTL**
-- States: `queued → parsing → embedding → complete | failed`
-- Frontend polls `GET /api/v1/ingest/job/{job_id}` to check progress
-
-### 10.4 OAuth State (`oauth_controller.py`)
-- OAuth CSRF state tokens stored in Redis with a **10-minute TTL**
-- Prevents broken OAuth flows when Render auto-scales across multiple instances
-
-### Graceful Degradation
-If Redis is unavailable (e.g., local dev without Docker):
-- `core/cache.py` falls back to an in-memory Python `dict` (`_fallback_cache`)
-- `core/limiter.py` pings Redis on startup; if it fails, uses `slowapi`'s in-memory backend
-- The application starts and works fully — only distributed features (multi-instance rate-limiting) are degraded
-
----
-
-## 11. Authentication & Security
-
-```mermaid
-sequenceDiagram
-    participant FE as Frontend
-    participant AUTH as /auth/login
-    participant MW as get_current_user Dependency
-    participant MONGO as MongoDB
-
-    FE->>AUTH: POST email, password
-    AUTH->>MONGO: find_one email
-    MONGO-->>AUTH: user document
-    AUTH->>AUTH: bcrypt.verify(password, hash)
-    AUTH->>AUTH: create_access_token user_id, email
-    AUTH-->>FE: 200 + Set-Cookie access_token=JWT HttpOnly SameSite=Lax
-
-    Note over FE: Cookie auto-sent on all subsequent requests
-
-    FE->>MW: Any protected route
-    MW->>MW: request.cookies.get("access_token")
-    Note over MW: Falls back to Authorization: Bearer header
-    MW->>MW: jwt.decode(token, SECRET_KEY)
-    MW->>MONGO: find_one({_id: user_id})
-    MONGO-->>MW: user document
-    MW->>MW: Inject user into route handler
-```
-
-**Security Details:**
-- **JWT** signed with `HS256` and `JWT_SECRET_KEY`; stored in an **`HttpOnly` cookie**
-- `secure=True` + `samesite="none"` in **production** (HTTPS only)
-- `secure=False` + `samesite="lax"` in **development** (HTTP localhost)
-- Password hashing: **bcrypt** via `passlib`
-- The `ENVIRONMENT` env var controls which cookie mode is active
-
----
-
-## 12. Dual-Layer Observability: LangSmith + Native Cost Analytics
-
-AgentX has **two complementary observability layers** that work simultaneously — each covering what the other cannot:
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        Every Chat Request                               │
-├───────────────────────┬─────────────────────────────────────────────────┤
-│   LangSmith Tracing   │        Native Token + Cost Tracking             │
-│   (External SaaS)     │        (Stored in YOUR MongoDB)                 │
-├───────────────────────┼─────────────────────────────────────────────────┤
-│ ✅ Visual graph trace │ ✅ Per-message token counts (exact)              │
-│ ✅ Full prompt text   │ ✅ Per-turn USD cost                             │
-│ ✅ Latency per node   │ ✅ Per-user aggregate spend                      │
-│ ✅ Debugging / replay │ ✅ Per-session aggregate spend                   │
-│ ❌ No per-user cost   │ ✅ Admin dashboard with drill-down               │
-│ ❌ SaaS dependency    │ ✅ No external dependency                        │
-│ ❌ Data leaves system │ ✅ Data stays in your MongoDB                    │
-└───────────────────────┴─────────────────────────────────────────────────┘
-```
-
-### Layer 1 — LangSmith (External Tracing)
-
-When `LANGCHAIN_TRACING_V2=true`, every LangGraph run is automatically traced:
-- Visual graph of node execution order and timing
-- Full prompts sent to Gemini (tokens, temperature, model)
-- Tool call inputs and outputs
-- Hallucination check results
-- Token cost per run
-
-Enable with: `LANGCHAIN_API_KEY=lsv2_...` and `LANGCHAIN_PROJECT="AgentX"`
-
-### Layer 2 — Native Cost Tracking (Built-In)
-
-This is the **primary cost accounting system** — it captures real token usage directly from the Gemini API response and stores it permanently in MongoDB.
-
-#### How it works (the technical detail)
-
-The key insight is that `astream_events` must be called with **`version="v2"`**. With `v1` (deprecated), events from LLM calls *inside* LangGraph nodes are swallowed and never surface. With `v2`, they bubble up correctly with `metadata.langgraph_node` populated:
-
-```python
-# In chat_service.py — the exact pattern used:
-async for event in chat_graph.astream_events(graph_input, version="v2", config=config):
-    event_type = event.get("event")
-    # v2 gives us the node name — filter to avoid double-counting on tool loops
-    node_name  = event.get("metadata", {}).get("langgraph_node", "")
-
-    elif event_type == "on_chat_model_end" and node_name == "chat_model":
-        usage = event["data"]["output"].usage_metadata
-        # usage = {"input_tokens": 523, "output_tokens": 148, "total_tokens": 671}
-        total_input_tokens  += usage.get("input_tokens", 0)
-        total_output_tokens += usage.get("output_tokens", 0)
-```
-
-> **Why `node_name == "chat_model"` filter?**
-> When the LLM loops back after a tool call, `on_chat_model_end` fires multiple times.
-> Without the node filter, tokens would be double-counted per tool round-trip.
-
-#### Pricing constants (Gemini 2.5 Flash)
-
-```python
-INPUT_PRICE_PER_TOKEN  = 0.075 / 1_000_000   # $0.075 per 1M input tokens
-OUTPUT_PRICE_PER_TOKEN = 0.30  / 1_000_000   # $0.30  per 1M output tokens
-cost_usd = total_input_tokens * INPUT_PRICE_PER_TOKEN + total_output_tokens * OUTPUT_PRICE_PER_TOKEN
-```
-
-#### Saved to MongoDB on every AI response
-
+### `conversations`
 ```json
 {
-  "role": "model",
-  "content": "...",
-  "model": "gemini-2.5-flash",
-  "input_tokens": 523,
-  "output_tokens": 148,
-  "cost_usd": 0.00005393,
-  "tool_steps": [...],
-  "timestamp": "2026-05-31T..."
-}
-```
-
-### Structlog (Per-Request Correlation IDs)
-
-`CorrelationIdMiddleware` injects a unique `X-Request-ID` UUID into every request. All downstream logs — even from deep inside LangGraph nodes — automatically carry this ID.
-
-```
-2026-05-31T09:57:10Z [info] http.request method=POST path=/chat/stream
-    request_id=bca8b9ea status=200 duration_ms=3241.0
-2026-05-31T09:57:10Z [info] token.usage user_id=64abc... conversation_id=...
-    model=gemini-2.5-flash input_tokens=523 output_tokens=148
-```
-
----
-
-## 13. Admin Analytics Dashboard
-
-The admin system gives platform operators a full **drill-down cost analytics dashboard** with data sourced from the native tracking layer (Layer 2 above).
-
-### Access Control
-
-All `/admin/*` routes are protected by the `require_admin()` FastAPI dependency:
-
-```python
-async def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
-    if not current_user.get("is_admin", False):
-        raise HTTPException(status_code=403, detail="Admin access required.")
-    return current_user
-```
-
-The `is_admin` field lives on the `users` document. Promote a user once via MongoDB:
-```js
-db.users.updateOne({ email: "you@example.com" }, { $set: { is_admin: true } })
-```
-Or run the helper script: `python create_admin.py`
-
-### Dashboard Drill-Down Hierarchy
-
-```
-/admin                        ← Platform overview cards + charts
-  └── /admin/users            ← All users table (cost per user)
-        └── /admin/users/{id}/sessions        ← All sessions for one user
-              └── /admin/users/{id}/sessions/{conv_id}  ← Turn-by-turn breakdown
-```
-
-### Drill-Down Example
-
-```mermaid
-flowchart TD
-    A["🖥️ /admin\nOverview: 42 users · $0.0012 total"]
-    A --> B["👤 /admin/users\nAll users table\nName · Sessions · Input Tokens · Cost"]
-    B --> C["🗂️ /admin/users/:id/sessions\nAll sessions for Alice\nTitle · Date · Turns · Cost"]
-    C --> D["💬 /admin/users/:id/sessions/:convId\nTurn-by-turn detail\nUser msg | AI msg (523 in · 148 out · $0.000054)"]
-```
-
-### Available Endpoints & What They Return
-
-| Endpoint | MongoDB Aggregation | Returns |
-|---|---|---|
-| `GET /admin/overview` | `$group` over all model messages | Total users, messages, tokens, cost |
-| `GET /admin/users` | Per-user `$group` + conv count | Name, email, sessions, AI turns, cost |
-| `GET /admin/users/{id}/sessions` | Per-conversation `$group` | Title, turns, input/output tokens, cost |
-| `GET /admin/users/{id}/sessions/{cid}` | Raw find + sort | All messages with token fields |
-| `GET /admin/usage/daily` | `$dayOfMonth` group (30 days) | Messages + cost per day |
-| `GET /admin/usage/models` | `$group` by `model` field | Count, cost, tokens per model |
-| `GET /admin/usage/tools` | `$unwind tool_steps` + `$group` | Top tools by call count |
-
-### Frontend Pages
-
-| Route | Component | Purpose |
-|---|---|---|
-| `/admin` | `AdminDashboard.jsx` | Overview cards, line chart, bar charts, users table |
-| `/admin/users/:userId` | `AdminUserPage.jsx` | Session list with cost per session |
-| `/admin/users/:userId/sessions/:convId` | `AdminSessionPage.jsx` | Turn-by-turn detail with expandable messages |
-
-All admin frontend routes are wrapped in `<AdminRoute>` which checks `user.is_admin` from React context and redirects non-admins to `/chat`.
-
----
-
-## 14. Hook System (Middleware for Tool Calls)
-
-`utils/hooks.py` implements a **decorator-based pre/post hook system** for all tool calls — both native and MCP.
-
-```python
-# Example hook registration
-@register_pre_tool_hook("tavily_search")
-async def log_web_search(tool_name, args):
-    logger.info(f"About to search web: {args['query']}")
-    # return {"deny": True} to block the call
-    # return {"modify": True, "args": {...}} to mutate arguments
-
-@register_post_tool_hook("tavily_search")
-async def audit_search_result(tool_name, result):
-    metrics.record(tool_name, result)
-```
-
-Every tool execution is also wrapped in a **`ToolTimer`** context manager that measures latency to the millisecond and logs it automatically.
-
----
-
-## 15. Database Schema (MongoDB)
-
-### `users` collection
-```json
-{
-  "_id": "ObjectId",
-  "email": "user@example.com",       // unique index
-  "name": "John Doe",
-  "password": "$2b$12$...",           // bcrypt hash
-  "is_admin": false,                  // true → access to /admin/* routes
-  "created_at": "ISODate",
+  "_id": "ObjectId", "user_id": "...", "title": "...",
+  "context_summary": "running cross-turn summary text",
+  "summary_covers_count": 40,
   "updated_at": "ISODate"
 }
 ```
 
-### `conversations` collection
+### `messages`
 ```json
 {
-  "_id": "ObjectId",
-  "user_id": "string",                // indexed with updated_at
-  "title": "First 50 chars of message",
-  "mcp_server_url": "string | null",
-  "created_at": "ISODate",
-  "updated_at": "ISODate"             // indexed DESC for sorting
-}
-```
-
-### `messages` collection
-```json
-{
-  "_id": "ObjectId",
-  "conversation_id": "string",        // compound index with user_id + timestamp
-  "user_id": "string",
-  "role": "user | model",
-  "content": "string",
-  "attachments": ["cloudinary_url"],  // optional media
-  "tool_steps": [                     // only on model messages
-    {"name": "tavily_search", "args": {...}, "result": "...", "status": "completed"}
-  ],
-  // ── Cost tracking fields (model messages only) ──
-  "model": "gemini-2.5-flash",        // which model generated this response
-  "input_tokens": 523,                // exact count from Gemini usage_metadata
-  "output_tokens": 148,               // exact count from Gemini usage_metadata
-  "cost_usd": 0.00005393,             // calculated: tokens × per-token price
+  "_id": "ObjectId", "conversation_id": "...", "user_id": "...",
+  "role": "user | model", "content": "...", "tool_steps": [...],
+  "model": "antigravity/gemini-3.5-flash-medium",
+  "input_tokens": 523, "output_tokens": 148, "cost_usd": 0.00527,
   "timestamp": "ISODate"
 }
 ```
 
-> **How token counts are captured**: The `on_chat_model_end` event from `astream_events(version="v2")` exposes `output.usage_metadata`. We filter by `metadata.langgraph_node == "chat_model"` to avoid double-counting on tool-call loops.
-
-### `tools` collection
+### `user_memories`
 ```json
-{
-  "_id": "ObjectId",
-  "tool_id": "tavily_search",          // unique index
-  "name": "tavily_search",
-  "description": "...",
-  "category": "search",
-  "requires_auth": false,
-  "is_enabled": true,
-  "updated_at": "ISODate"
-}
-```
-
-### `user_memories` collection
-```json
-{
-  "_id": "ObjectId",
-  "user_id": "string",                // unique
-  "memories": [
-    {"topic": "tech stack", "content": "...", "created_at": "...", "updated_at": "..."}
-  ],
-  "updated_at": "ISODate"
-}
+{ "_id": "ObjectId", "user_id": "...", "memories": [{"topic": "...", "content": "..."}] }
 ```
 
 ---
 
-## 16. Environment Variables Reference
+## 20. Infrastructure & Deployment
+
+No orchestration platform — two purpose-built EC2 boxes and a managed data layer.
+
+| Component | Where |
+|---|---|
+| Backend | AWS EC2 (Amazon Linux 2023), Docker container `chatbot-backend`, nginx + Let's Encrypt at `agentx-api.ankitrajai.in` |
+| LLM gateway, PDF parser, sandbox host | A **second** EC2 box: OmniRoute (Node LLM gateway → Gemini) + a custom PDF parser microservice + the gVisor Sandbox Execution Service (`sandbox-service.service`) — all behind nginx with a shared API-key gate. Never exposed directly to the public internet; only reachable from the backend box. |
+| Frontend | Vercel — auto-deploys on push to `main` |
+| Data layer | MongoDB Atlas, Qdrant, Redis, Cloudinary — all managed, nothing stateful on the app box itself |
+
+### CI/CD (GitHub Actions)
+
+1. **`Backend tests`** — push/PR to `main` or manual dispatch: full `pytest` suite.
+2. **`Deploy backend`** — triggered via `workflow_run` only after tests pass: rsyncs the repo to a fresh
+   versioned directory on the box, carries the gitignored `.env` forward from the previous deploy,
+   `docker build`s a new image, stops and renames the old container (kept for rollback, not deleted),
+   starts the new one, then health-checks it — **automatically rolling back to the previous container
+   on failure**.
+
+Every previous deployed container is kept, stopped, for instant rollback.
+
+---
+
+## 21. Environment Variables Reference
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GOOGLE_API_KEY` | ✅ | Gemini API key (also used for embeddings) |
 | `MONGO_URI` | ✅ | MongoDB Atlas connection string |
 | `JWT_SECRET_KEY` | ✅ | Secret for signing JWTs |
-| `REDIS_URL` | ✅ | `rediss://default:pass@host:6379` (Upstash) |
-| `QDRANT_URL` | ✅ | Qdrant Cloud cluster URL |
-| `QDRANT_API_KEY` | ✅ | Qdrant API key |
-| `QDRANT_COLLECTION` | ✅ | Vector collection name (default: `agentic_rag_v1`) |
-| `LLAMA_CLOUD_API_KEY` | ✅ | LlamaParse API key for PDF parsing |
-| `TAVILY_API_KEY` | ⚠️ Optional | Web search (skipped if missing) |
-| `CLOUDINARY_CLOUD_NAME` | ⚠️ Optional | For image upload support |
-| `CLOUDINARY_API_KEY` | ⚠️ Optional | Cloudinary API key |
-| `CLOUDINARY_API_SECRET` | ⚠️ Optional | Cloudinary API secret |
-| `CLIENT_ID` | ⚠️ Optional | Google OAuth client ID |
-| `CLIENT_SECRET` | ⚠️ Optional | Google OAuth client secret |
-| `LANGCHAIN_TRACING_V2` | ⚠️ Optional | `"true"` to enable LangSmith tracing |
-| `LANGCHAIN_API_KEY` | ⚠️ Optional | LangSmith API key |
-| `LANGCHAIN_PROJECT` | ⚠️ Optional | LangSmith project name |
-| `ENVIRONMENT` | ⚠️ Optional | `"production"` to enable secure cookies |
-| `ALLOWED_ORIGINS` | ⚠️ Optional | Comma-separated CORS origins |
-| `BACKEND_URL` | ⚠️ Optional | Backend URL (for OAuth callbacks) |
-| `FRONTEND_URL` | ⚠️ Optional | Frontend URL (for OAuth redirects) |
-| `CHAT_RATE_LIMIT` | ⚠️ Optional | Requests/minute for `/chat/stream` (default: 20) |
-| `UPLOAD_RATE_LIMIT` | ⚠️ Optional | Requests/minute for `/ingest/upload` (default: 5) |
-| `PORT` | ⚠️ Optional | Server port (default: 8000) |
+| `OMNIROUTE_BASE_URL` / `OMNIROUTE_API_KEY` | ✅ | LLM gateway in front of Gemini |
+| `QDRANT_URL` / `QDRANT_API_KEY` / `QDRANT_COLLECTION` | ✅ | Vector store |
+| `LLAMA_CLOUD_API_KEY` | ✅ | LlamaParse for document ingestion |
+| `REDIS_URL` | ⚠️ Optional | Degrades gracefully to in-memory if absent |
+| `SANDBOX_EXECUTOR_MODE` | ⚠️ Optional | `local` (default) or `remote` (gVisor host) |
+| `SANDBOX_SERVICE_URL` / `SANDBOX_SERVICE_TOKEN` | Required if `remote` | The dedicated sandbox host |
+| `WORKSPACE_ROOT` | ⚠️ Optional | Per-user sandbox root (default `~/agentx_workspace`) |
+| `DEFAULT_CREDIT_CAP_USD` | ⚠️ Optional | Free-tier cap per user (default `5.0`) |
+| `CREDIT_GRACE_USD` | ⚠️ Optional | Mid-turn grace buffer past the cap (default `1.0`) |
+| `TAVILY_API_KEY` | ⚠️ Optional | Web search — skipped if missing |
+| `CLOUDINARY_CLOUD_NAME` / `_API_KEY` / `_API_SECRET` | ⚠️ Optional | Image/attachment storage |
+| `CLIENT_ID` / `CLIENT_SECRET` | ⚠️ Optional | Google Drive OAuth |
+| `LANGCHAIN_TRACING_V2` / `_API_KEY` / `_PROJECT` | ⚠️ Optional | LangSmith tracing |
+| `ENVIRONMENT` | ⚠️ Optional | `production` enables secure cookies |
+| `ALLOWED_ORIGINS` / `BACKEND_URL` / `FRONTEND_URL` | ⚠️ Optional | CORS + OAuth redirect targets |
+| `CHAT_RATE_LIMIT` / `UPLOAD_RATE_LIMIT` | ⚠️ Optional | Per-minute limits (default `20` / `5`) |
+
+See `.env.sample` for the complete, currently-accurate list — it is the source of truth, not this table.
 
 ---
 
-## 17. Running Locally & E2E Testing
+## 22. Running Locally & Testing
 
-### Start the backend
 ```bash
 cd backend
 python -m venv venv
-venv\Scripts\activate          # Windows
-# source venv/bin/activate     # Mac/Linux
+venv\Scripts\activate            # Windows / source venv/bin/activate on Mac/Linux
 
 pip install -r requirements.txt
-cp .env.sample .env            # Fill in your keys
+cp .env.sample .env              # fill in your keys
 
 uvicorn main:app --reload --port 8000
 ```
 
-### Verify health
 ```bash
 curl http://localhost:8000/health
-# {"status": "healthy", "checks": {"mongodb": "ok", "redis": "ok", "qdrant": "ok"}}
 ```
 
-### Run the full E2E test suite (22 tests)
+### Test suite (pytest-asyncio, auto mode)
+
 ```bash
-$env:PYTHONIOENCODING="utf8"  # Windows PowerShell
-python run_e2e_fix.py
+pytest                                              # full suite
+pytest tests/test_credit_service.py                 # a single file
+pytest tests/test_agent_v3.py::TestClass::test_name -v
 ```
 
-The suite validates: Auth (signup/login/logout) → Conversation CRUD → SSE Streaming Chat → Tool Call → PDF Upload & Ingestion → RAG Retrieve → Agentic Chat → Memory Cleanup.
+`tests/test_integration_live.py` hits real external services (Gemini, Qdrant, etc.) — it needs live API
+keys/network, and its failures shouldn't be treated the same as a unit test regression. The same suite
+runs automatically in CI on every push/PR to `main` (see §20).
 
-**Expected result:**
-```
-Total 22 | Pass 22 | Fail 0 | Error 0
-```
-
-### Interactive API Docs
-Visit: `http://localhost:8000/docs` (Swagger UI)
+Interactive API docs: `http://localhost:8000/docs`
