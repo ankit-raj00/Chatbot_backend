@@ -1,5 +1,14 @@
-fastapi
-uvicorn
+# Pinned (2026-08-09): were completely unpinned, so a fresh `pip install`
+# (every Docker build, and CI) could silently resolve a newer, untested
+# version. Confirmed live: CI's fresh install pulled a newer Starlette whose
+# internal route object shape changed enough to break
+# tests/test_e2e.py's route introspection (fixed defensively there too, but
+# pinning here stops local/CI/production from silently drifting apart in
+# the first place). Versions below match what's actually running in
+# production right now (chatbot-backend:v19), verified via `docker exec`.
+fastapi==0.141.1
+starlette==1.6.0
+uvicorn==0.52.1
 motor
 pymongo
 python-dotenv
