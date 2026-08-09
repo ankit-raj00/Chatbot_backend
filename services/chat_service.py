@@ -54,6 +54,7 @@ from graph.builder import get_agent_graph
 from graph.nodes.common import ChatState
 from utils.mcp_connection_manager import mcp_manager
 from utils.background_tasks import spawn
+from utils import sandbox_client
 
 import structlog
 logger = structlog.get_logger(__name__)
@@ -716,6 +717,18 @@ class ChatService:
                                     turn_cost_so_far=turn_cost_so_far, ceiling=MAX_TURN_COST_USD,
                                 )
                                 asyncio.current_task().cancel()
+
+            # ── Step 7a: Pull files generated on the sandbox host ────────────────
+            # In remote mode the agent's code ran on the sandbox box, so anything
+            # it wrote lives there, not here. Sync it down BEFORE the detection
+            # below so that snapshot-diff — and /outputs serving — keep working
+            # exactly as they do in local mode, with no changes to either.
+            if sandbox_client.is_remote():
+                try:
+                    await sandbox_client.sync_outputs(user_id, conversation_id, _outputs_dir)
+                except Exception as e:                       # noqa: BLE001
+                    logger.error("sandbox.output_sync_failed",
+                                 conversation_id=conversation_id, error=str(e))
 
             # ── Step 7b: Detect files created/updated during this agent run ──────
             created_files = []
