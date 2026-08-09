@@ -13,9 +13,13 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
+    # No working-directory override, no backend/ prefix anywhere below:
+    # unlike the top-level chatbot monorepo, THIS repo (Chatbot_backend.git)
+    # IS the backend at its own root — requirements.txt lives right here,
+    # not under a backend/ subdirectory. Confirmed live: the first run
+    # failed at setup-python with "No file ... matched to
+    # [backend/requirements.txt]" because the path assumed a subdirectory
+    # that doesn't exist in this repo.
 
     steps:
       - uses: actions/checkout@v4
@@ -24,7 +28,7 @@ jobs:
         with:
           python-version: "3.11"   # matches the production Dockerfile's base image
           cache: pip
-          cache-dependency-path: backend/requirements.txt
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -45,10 +49,10 @@ jobs:
           MONGO_URI: ${{ secrets.MONGO_URI }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           LLAMA_CLOUD_API_KEY: ${{ secrets.LLAMA_CLOUD_API_KEY }}
-          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_URL: ${{ vars.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
           QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION }}
-          CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+          CLOUDINARY_CLOUD_NAME: ${{ vars.CLOUDINARY_CLOUD_NAME }}
           CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
           CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
