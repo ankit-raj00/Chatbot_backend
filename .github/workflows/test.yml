@@ -71,4 +71,11 @@ jobs:
           # depends on the sandbox host being reachable from a GitHub-hosted
           # runner (it isn't — that host's security group only admits the
           # real backend's IP, by design, see TIER2_SANDBOX_PLAN.md).
-        run: pytest -q --ignore=tests/test_integration_live.py
+        # `python -m pytest`, not bare `pytest`: -m prepends the current
+        # directory to sys.path, which is how services/core/etc. resolve as
+        # importable at all (this repo has no top-level package __init__,
+        # and there's no pytest.ini pythonpath config) -- matches the exact
+        # invocation used for every local run this session. Confirmed live:
+        # bare `pytest` failed 2 of 3 test files with
+        # "ModuleNotFoundError: No module named 'services'".
+        run: python -m pytest -q --ignore=tests/test_integration_live.py
