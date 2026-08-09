@@ -5,9 +5,9 @@ name: Backend tests
 # here — see SESSION_HANDOFF.md if that's revisited later.
 on:
   push:
-    branches: ["**"]
+    branches: ["main"]        # only main -- feature branches don't trigger this
   pull_request:
-    branches: ["**"]
+    branches: ["main"]        # still checks PRs targeting main before merge
   workflow_dispatch:   # lets you (or `gh workflow run test.yml`) trigger a re-run manually
 
 jobs:
