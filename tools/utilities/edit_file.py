@@ -15,6 +15,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from utils.workspace import conversation_workspace_for, is_path_within_conversation_sandbox
+from utils import sandbox_client
 
 
 def _count_diff_lines(old_text: str, new_text: str) -> tuple[int, int]:
@@ -62,6 +63,17 @@ def make_edit_file_tool(user_id: str, conversation_id: str):
         target = (ws_root / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
         if not is_path_within_conversation_sandbox(user_id, conversation_id, path):
             return "BLOCKED: path outside sandbox"
+
+        if sandbox_client.is_remote():
+            # Same staleness problem as analyze_image, plus a second one:
+            # this tool's OWN edit needs to reach the sandbox host afterward,
+            # or the next run_python/run_shell call (which executes remotely)
+            # would see the file as if the edit never happened.
+            remote_bytes = await sandbox_client.pull_file(user_id, conversation_id, path)
+            if remote_bytes is not None:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(remote_bytes)
+
         if not target.exists():
             return f"Error: file not found: {path}"
         if not target.is_file():
@@ -84,8 +96,16 @@ def make_edit_file_tool(user_id: str, conversation_id: str):
         updated = original.replace(old_string, new_string) if replace_all else original.replace(old_string, new_string, 1)
 
         target.write_text(updated, encoding="utf-8")
-        added, removed = _count_diff_lines(original, updated)
 
+        if sandbox_client.is_remote():
+            pushed = await sandbox_client.push_file(
+                user_id, conversation_id, path, updated.encode("utf-8"))
+            if not pushed:
+                return (f"Edited {path} locally, but FAILED to push the edit to the sandbox — "
+                        f"a run_python/run_shell call would still see the OLD content. "
+                        f"Treat this edit as not applied.")
+
+        added, removed = _count_diff_lines(original, updated)
         return f"Edited {path} (+{added} -{removed} lines)"
 
     return edit_file

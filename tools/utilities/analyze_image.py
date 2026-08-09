@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 
 from utils.workspace import conversation_workspace_for, is_path_within_conversation_sandbox
 from config.model_config import ModelConfig
+from utils import sandbox_client
 
 # Long-edge cap — images larger than this are downscaled before the vision call
 # to keep the request small/fast (this is well within typical vision limits and
@@ -86,6 +87,19 @@ def make_analyze_image_tool(user_id: str, conversation_id: str):
             return "BLOCKED: path outside sandbox"
 
         target = (ws_root / sandbox_path).resolve() if not Path(sandbox_path).is_absolute() else Path(sandbox_path).resolve()
+
+        if sandbox_client.is_remote():
+            # In remote mode the file may exist ONLY on the sandbox host —
+            # e.g. run_python generated it earlier in this SAME turn, before
+            # the once-per-turn outputs/ sync runs, or it's in work/ (never
+            # synced back at all). Fetch fresh rather than trust/require a
+            # local copy; falls through to the local-file check below (and
+            # its existing "not found" error) if the sandbox doesn't have it.
+            remote_bytes = await sandbox_client.pull_file(user_id, conversation_id, sandbox_path)
+            if remote_bytes is not None:
+                await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+                await asyncio.to_thread(target.write_bytes, remote_bytes)
+
         if not target.exists() or not target.is_file():
             return f"Error: image not found at '{sandbox_path}'."
         if target.suffix.lower() not in _IMAGE_EXTS:
