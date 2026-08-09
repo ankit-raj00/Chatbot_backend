@@ -1,0 +1,96 @@
+name: Deploy backend
+
+# Runs after "Backend tests" finishes successfully on main, or manually via
+# workflow_dispatch. Mirrors the manual process this project used before CI/CD
+# existed: rsync the repo to a fresh versioned directory on the EC2 box, copy
+# the (gitignored) .env forward from the previous deploy, docker build, then
+# swap the running container — keeping the old one around, renamed, so a
+# failed health check can roll straight back to it.
+on:
+  workflow_run:
+    workflows: ["Backend tests"]
+    types: [completed]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up deploy key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy
+        id: deploy
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -e
+          SSH_OPTS="-i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
+          VERSION="ci-${{ github.run_number }}"
+          REMOTE_DIR="chatbot-backend-$VERSION"
+          PREV_BACKUP="chatbot-backend-prev-$(date +%s)"
+          echo "prev_backup=$PREV_BACKUP" >> "$GITHUB_OUTPUT"
+
+          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p ~/$REMOTE_DIR"
+
+          # .env is gitignored (never in the checkout) and deliberately excluded
+          # here too, so --delete can't touch the destination's real .env before
+          # we've had a chance to copy the previous one forward below.
+          rsync -az --delete \
+            --exclude='.git' --exclude='.github' --exclude='venv' \
+            --exclude='__pycache__' --exclude='.env' \
+            -e "ssh $SSH_OPTS" \
+            ./ "$DEPLOY_USER@$DEPLOY_HOST:~/$REMOTE_DIR/"
+
+          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "
+            set -e
+            LATEST_ENV=\$(ls -dt ~/chatbot-backend-v* ~/chatbot-backend-ci-* 2>/dev/null | grep -v '$REMOTE_DIR\$' | head -1)/.env
+            cp \"\$LATEST_ENV\" ~/$REMOTE_DIR/.env
+
+            cd ~/$REMOTE_DIR
+            docker build -t chatbot-backend:$VERSION .
+
+            docker stop chatbot-backend
+            docker rename chatbot-backend $PREV_BACKUP
+
+            docker run -d --name chatbot-backend --restart unless-stopped \
+              -p 8000:8000 \
+              --env-file ~/$REMOTE_DIR/.env \
+              -v /home/ec2-user/agentx_workspace:/data/agentx_workspace \
+              chatbot-backend:$VERSION
+          "
+
+      - name: Health check (rolls back on failure)
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ok=""
+          for i in $(seq 1 10); do
+            if curl -sf https://agentx-api.ankitrajai.in/docs > /dev/null; then ok=1; break; fi
+            sleep 3
+          done
+
+          if [ -z "$ok" ]; then
+            echo "Health check failed — rolling back to ${{ steps.deploy.outputs.prev_backup }}"
+            ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no "$DEPLOY_USER@$DEPLOY_HOST" "
+              docker stop chatbot-backend 2>/dev/null || true
+              docker rm chatbot-backend 2>/dev/null || true
+              docker rename ${{ steps.deploy.outputs.prev_backup }} chatbot-backend
+              docker start chatbot-backend
+            "
+            exit 1
+          fi
+          echo "Healthy"
