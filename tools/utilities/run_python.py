@@ -12,9 +12,10 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 from langchain_core.callbacks import adispatch_custom_event
-from utils.workspace import conversation_workspace_for, venv_python_for, pip_cache_dir_for, is_path_within_conversation_sandbox
+from utils.workspace import conversation_workspace_for, venv_python_for, pip_cache_dir_for
 from utils.code_executor import stream_python, sandbox_env, _sandbox_user_kwargs
 from utils import sandbox_client
+from utils.hooks import check_sandbox_path
 
 _TIMEOUT = 300  # seconds
 
@@ -171,8 +172,11 @@ def make_run_python_tool(user_id: str, conversation_id: str):
                 the run. Strongly recommended for anything you might need to
                 iterate on.
         """
-        if filename and not is_path_within_conversation_sandbox(user_id, conversation_id, filename):
-            return "BLOCKED: filename path outside sandbox"
+        # Centralized in utils/hooks.py (Tier 2.3) — same reasoning as run_shell.py.
+        if filename:
+            block_reason = check_sandbox_path("run_python", {"filename": filename}, user_id, conversation_id)
+            if block_reason:
+                return f"BLOCKED: {block_reason}"
 
         if sandbox_client.is_remote():
             # Remote mode: SES owns the venv and the workspace, so there's no
