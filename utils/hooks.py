@@ -117,9 +117,9 @@ BLOCKED_PATTERNS = [
 
 # Which single sandbox-relative-path argument each tool takes, if any.
 _SANDBOX_PATH_ARG_BY_TOOL = {
-    "run_python": "filename",   # optional — only present when persisting a script
-    "edit_file": "path",
-    "analyze_image": "sandbox_path",
+    "sandbox_run_python": "filename",   # optional — only present when persisting a script
+    "sandbox_edit_file": "path",
+    "sandbox_analyze_image": "sandbox_path",
 }
 
 
@@ -198,7 +198,7 @@ async def _sandbox_guard_hook(tool_name: str, tool_args: dict, user_id: str,
     reason = check_sandbox_path(tool_name, tool_args, user_id, conversation_id)
     if reason:
         return {"deny": True, "reason": reason}
-    if tool_name == "run_shell":
+    if tool_name == "sandbox_run_shell":
         reason = check_run_shell_command(tool_args.get("command", ""), user_id, conversation_id)
         if reason:
             return {"deny": True, "reason": reason}

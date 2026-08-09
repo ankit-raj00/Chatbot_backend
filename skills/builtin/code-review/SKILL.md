@@ -22,7 +22,7 @@ metadata:
 ## Workflow
 
 1. Analyze the provided code snippet or file carefully
-2. Run the code with `run_python` tool if it's Python and execution would reveal issues
+2. Run the code with `sandbox_run_python` tool if it's Python and execution would reveal issues
 3. Output your review in strict categories
 4. Provide exact code snippets showing how to fix each issue
 

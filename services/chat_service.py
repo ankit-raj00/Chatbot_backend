@@ -364,8 +364,8 @@ class ChatService:
 
             # ── Step 6: Build supervisor input ──────────────────────────
             # Uploaded files live in the sandbox. Images are looked at with the
-            # analyze_image vision tool (by sandbox path); other files are read
-            # with run_python/run_shell.
+            # sandbox_analyze_image vision tool (by sandbox path); other files
+            # are read with sandbox_run_python/sandbox_run_shell.
             current_content = [{"type": "text", "text": message}] + files_content_parts
             if attachments:
                 image_atts = [a for a in attachments if a.get("is_image")]
@@ -374,11 +374,11 @@ class ChatService:
                 if image_atts:
                     paths = ", ".join(a.get("sandbox_path", f"uploads/{a.get('original_name', 'image')}") for a in image_atts)
                     notes.append(f"[Image(s) uploaded to your sandbox at: {paths}. "
-                                 f"To see them, call analyze_image(sandbox_path, query).]")
+                                 f"To see them, call sandbox_analyze_image(sandbox_path, query).]")
                 if file_atts:
                     paths = ", ".join(a.get("sandbox_path", f"uploads/{a.get('original_name', 'file')}") for a in file_atts)
                     notes.append(f"[File(s) uploaded to your sandbox at: {paths}. "
-                                 f"Read them with run_python/run_shell.]")
+                                 f"Read them with sandbox_run_python/sandbox_run_shell.]")
                 if notes:
                     note = "\n\n" + "\n".join(notes)
                     current_content[0]["text"] += note
@@ -614,7 +614,7 @@ class ChatService:
                                 return s
                         return None
 
-                    if tool_name == "edit_file":
+                    if tool_name == "sandbox_edit_file":
                         # Parse "Edited <path> (+N -M lines)" so the UI can show a
                         # compact diff pill instead of a wall of code — mirrors the
                         # run_python file-creation regex parsing above.

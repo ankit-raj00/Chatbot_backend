@@ -21,9 +21,9 @@ CONV_ID = "test_hooks_conv"
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool_name,path_arg,bad_path", [
-    ("edit_file", "path", "../../etc/passwd"),
-    ("analyze_image", "sandbox_path", "../../../etc/shadow"),
-    ("run_python", "filename", "../outside.py"),
+    ("sandbox_edit_file", "path", "../../etc/passwd"),
+    ("sandbox_analyze_image", "sandbox_path", "../../../etc/shadow"),
+    ("sandbox_run_python", "filename", "../outside.py"),
 ])
 async def test_hook_denies_path_escape_without_the_tool_doing_anything(tool_name, path_arg, bad_path):
     """The hook alone must catch this — not the tool's own code, which this
@@ -35,25 +35,25 @@ async def test_hook_denies_path_escape_without_the_tool_doing_anything(tool_name
 
 @pytest.mark.asyncio
 async def test_hook_allows_a_safe_path():
-    result = await run_pre_tool_hooks("edit_file", {"path": "work/notes.txt"}, USER_ID, CONV_ID)
+    result = await run_pre_tool_hooks("sandbox_edit_file", {"path": "work/notes.txt"}, USER_ID, CONV_ID)
     assert result is None
 
 
 @pytest.mark.asyncio
 async def test_hook_denies_run_shell_escape_via_hook_alone():
-    result = await run_pre_tool_hooks("run_shell", {"command": "cat ../../etc/passwd"}, USER_ID, CONV_ID)
+    result = await run_pre_tool_hooks("sandbox_run_shell", {"command": "cat ../../etc/passwd"}, USER_ID, CONV_ID)
     assert result is not None and result.get("deny") is True
 
 
 @pytest.mark.asyncio
 async def test_hook_denies_run_shell_destructive_pattern():
-    result = await run_pre_tool_hooks("run_shell", {"command": "rm -rf /"}, USER_ID, CONV_ID)
+    result = await run_pre_tool_hooks("sandbox_run_shell", {"command": "rm -rf /"}, USER_ID, CONV_ID)
     assert result is not None and result.get("deny") is True
 
 
 @pytest.mark.asyncio
 async def test_hook_allows_a_safe_shell_command():
-    result = await run_pre_tool_hooks("run_shell", {"command": "echo hello"}, USER_ID, CONV_ID)
+    result = await run_pre_tool_hooks("sandbox_run_shell", {"command": "echo hello"}, USER_ID, CONV_ID)
     assert result is None
 
 

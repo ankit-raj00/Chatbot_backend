@@ -84,7 +84,7 @@ async def _auto_install_and_retry_streaming(code: str, error: str, cwd: str, use
             lines.append(item["line"])
             await adispatch_custom_event(
                 "exec_output",
-                {"tool": "run_python", "line": item["line"], "stream": item["stream"]},
+                {"tool": "sandbox_run_python", "line": item["line"], "stream": item["stream"]},
             )
 
     joined = "\n".join(lines) or "(no output)"
@@ -126,7 +126,7 @@ async def _auto_install_and_retry_remote(code: str, error: str, user_id: str,
             lines.append(item["line"])
             await adispatch_custom_event(
                 "exec_output",
-                {"tool": "run_python", "line": item["line"], "stream": item["stream"]},
+                {"tool": "sandbox_run_python", "line": item["line"], "stream": item["stream"]},
             )
     joined = "\n".join(lines) or "(no output)"
     return f"[Auto-installed missing package and retried]\n{joined}"
@@ -143,7 +143,7 @@ def make_run_python_tool(user_id: str, conversation_id: str):
     cwd = str(conversation_workspace_for(user_id, conversation_id))
 
     @tool
-    async def run_python(code: str, filename: str = "") -> str:
+    async def sandbox_run_python(code: str, filename: str = "") -> str:
         """
         Execute a complete, self-contained Python script in a sandboxed
         subprocess and return combined stdout+stderr.
@@ -174,7 +174,7 @@ def make_run_python_tool(user_id: str, conversation_id: str):
         """
         # Centralized in utils/hooks.py (Tier 2.3) — same reasoning as run_shell.py.
         if filename:
-            block_reason = check_sandbox_path("run_python", {"filename": filename}, user_id, conversation_id)
+            block_reason = check_sandbox_path("sandbox_run_python", {"filename": filename}, user_id, conversation_id)
             if block_reason:
                 return f"BLOCKED: {block_reason}"
 
@@ -197,7 +197,7 @@ def make_run_python_tool(user_id: str, conversation_id: str):
                 lines.append(item["line"])
                 await adispatch_custom_event(
                     "exec_output",
-                    {"tool": "run_python", "line": item["line"], "stream": item["stream"]},
+                    {"tool": "sandbox_run_python", "line": item["line"], "stream": item["stream"]},
                 )
 
         output = "\n".join(lines) or "(no output)"
@@ -214,4 +214,4 @@ def make_run_python_tool(user_id: str, conversation_id: str):
             output = f"[Saved to {filename}]\n{output}"
         return output[:10000]
 
-    return run_python
+    return sandbox_run_python

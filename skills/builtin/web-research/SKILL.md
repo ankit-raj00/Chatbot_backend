@@ -22,8 +22,8 @@ metadata:
 ## Workflow
 
 1. Call the `internet_search` tool directly (e.g. `internet_search(query="...")`)
-   to find initial sources. Do NOT hand-roll a scraper in run_python (fetching
-   Google/Bing/DuckDuckGo HTML yourself, parsing redirect links, etc.) —
+   to find initial sources. Do NOT hand-roll a scraper in sandbox_run_python
+   (fetching Google/Bing/DuckDuckGo HTML yourself, parsing redirect links, etc.) —
    `internet_search` already does this properly (ranked results + deep-fetched
    page content) and is faster and more reliable than improvising one.
 2. Identify the top 3-5 most relevant URLs from results

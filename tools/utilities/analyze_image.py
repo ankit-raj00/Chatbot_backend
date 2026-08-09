@@ -1,19 +1,19 @@
 """
-analyze_image — the agent's vision tool.
+sandbox_analyze_image — the agent's vision tool.
 
 Modern "vision sub-call" architecture: the main agent calls
-analyze_image(sandbox_path, query); this tool loads the image from the sandbox,
-makes an ISOLATED vision LLM call with the image as a base64 data URI in a USER
-message, and returns the model's text answer. This is required because the LLM
-gateway (OmniRoute -> Gemini) only accepts image input in a user message — it
-ignores images placed in tool-role messages and rejects plain image URLs. So we
-can't hand the raw image back as a tool result; instead we do the "looking"
-inside the tool and return what was seen.
+sandbox_analyze_image(sandbox_path, query); this tool loads the image from
+the sandbox, makes an ISOLATED vision LLM call with the image as a base64
+data URI in a USER message, and returns the model's text answer. This is
+required because the LLM gateway (OmniRoute -> Gemini) only accepts image
+input in a user message — it ignores images placed in tool-role messages and
+rejects plain image URLs. So we can't hand the raw image back as a tool
+result; instead we do the "looking" inside the tool and return what was seen.
 
 Works for ANY image in the sandbox — user uploads (uploads/…), files the agent
-generated (outputs/…, work/…) — on any turn. This lets the agent visually verify
-its own output: render a chart/PDF page to PNG, then analyze_image it to check
-the result before delivering.
+generated (outputs/…, work/…) — on any turn. This lets the agent visually
+verify its own output: render a chart/PDF page to PNG, then
+sandbox_analyze_image it to check the result before delivering.
 """
 import asyncio
 import base64
@@ -74,18 +74,18 @@ def make_analyze_image_tool(user_id: str, conversation_id: str):
                                        "targeted questions (e.g. 'What is the hex color of the header?', "
                                        "'Transcribe all text', 'Is the chart's title centered?').")
 
-    async def analyze_image(sandbox_path: str, query: str = _DEFAULT_QUERY) -> str:
+    async def sandbox_analyze_image(sandbox_path: str, query: str = _DEFAULT_QUERY) -> str:
         """
         Look at an image with vision and answer a question about it.
 
         Use this for ANY image you need to SEE — a picture the user uploaded, or
         one you generated yourself (e.g. render a chart or a PDF page to PNG, then
-        analyze_image it to visually verify the result before finishing).
+        sandbox_analyze_image it to visually verify the result before finishing).
 
         Returns a text description/answer, not the raw image.
         """
         # Centralized in utils/hooks.py (Tier 2.3) — same reasoning as run_shell.py.
-        block_reason = check_sandbox_path("analyze_image", {"sandbox_path": sandbox_path}, user_id, conversation_id)
+        block_reason = check_sandbox_path("sandbox_analyze_image", {"sandbox_path": sandbox_path}, user_id, conversation_id)
         if block_reason:
             return f"BLOCKED: {block_reason}"
 
@@ -107,7 +107,7 @@ def make_analyze_image_tool(user_id: str, conversation_id: str):
             return f"Error: image not found at '{sandbox_path}'."
         if target.suffix.lower() not in _IMAGE_EXTS:
             return (f"Error: '{sandbox_path}' does not look like an image "
-                    f"({target.suffix or 'no extension'}). Read non-image files with run_python/run_shell.")
+                    f"({target.suffix or 'no extension'}). Read non-image files with sandbox_run_python/sandbox_run_shell.")
 
         try:
             raw = await asyncio.to_thread(target.read_bytes)
@@ -132,8 +132,8 @@ def make_analyze_image_tool(user_id: str, conversation_id: str):
         return str(content) or "(the vision model returned no text)"
 
     return StructuredTool.from_function(
-        coroutine=analyze_image,
-        name="analyze_image",
+        coroutine=sandbox_analyze_image,
+        name="sandbox_analyze_image",
         description="Look at an image (uploaded OR one you generated) with vision and answer a "
                     "question about it. Returns a text answer. Use it to inspect user images and "
                     "to visually verify your own rendered output (charts, PDF pages, etc.).",

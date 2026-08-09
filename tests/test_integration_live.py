@@ -17,7 +17,7 @@ What is tested:
         (skill lookup itself, independent of any graph)
   IT04  All builtin skill triggers work
   IT05  Full v3 agent run: plain chat question -> real LLM response
-  IT06  Full v3 agent run: the agent calls a tool (run_python) when asked to
+  IT06  Full v3 agent run: the agent calls a tool (sandbox_run_python) when asked to
   IT07  Full v3 agent run: code-writing question -> response contains code
   IT10  Multi-turn memory: caller-supplied history lets the LLM recall turn 1
         (mirrors how services/chat_service.py actually does this -- no
@@ -144,8 +144,8 @@ class TestIT05FullAgentRun:
         assert isinstance(result["messages"][-1], AIMessage)
 
     @pytest.mark.asyncio
-    async def test_it06_agent_calls_run_python_tool_when_asked(self):
-        """Explicit instruction to use run_python must produce a tool call and a
+    async def test_it06_agent_calls_sandbox_run_python_tool_when_asked(self):
+        """Explicit instruction to use sandbox_run_python must produce a tool call and a
         real file on disk in the user's sandbox (proves the sandbox tool actually
         executes through the live OmniRoute-backed agent)."""
         from utils.workspace import workspace_for, conversation_workspace_for
@@ -155,18 +155,18 @@ class TestIT05FullAgentRun:
         try:
             result = await _run_agent(
                 [HumanMessage(content=(
-                    "Use run_python to write the exact text 'integration_test_ok' "
+                    "Use sandbox_run_python to write the exact text 'integration_test_ok' "
                     "into outputs/it06.txt, then print the path. Do it now."
                 ))],
                 user_id=user_id,
                 conversation_id=conversation_id,
             )
-            tool_msgs = [m for m in result["messages"] if getattr(m, "name", None) == "run_python"]
-            print(f"\n  -> run_python tool messages: {len(tool_msgs)}")
-            assert tool_msgs, "Agent never called run_python"
+            tool_msgs = [m for m in result["messages"] if getattr(m, "name", None) == "sandbox_run_python"]
+            print(f"\n  -> sandbox_run_python tool messages: {len(tool_msgs)}")
+            assert tool_msgs, "Agent never called sandbox_run_python"
 
             out_file = conversation_workspace_for(user_id, conversation_id) / "outputs" / "it06.txt"
-            assert out_file.exists(), "run_python did not create the expected output file"
+            assert out_file.exists(), "sandbox_run_python did not create the expected output file"
             assert "integration_test_ok" in out_file.read_text(encoding="utf-8")
         finally:
             shutil.rmtree(workspace_for(user_id), ignore_errors=True)
