@@ -132,6 +132,27 @@ async def push_file(user_id: str, conversation_id: str, rel_path: str,
         return False
 
 
+async def pull_file(user_id: str, conversation_id: str, rel_path: str) -> bytes | None:
+    """Fetch ONE file's current bytes directly from the sandbox host, unlike
+    sync_outputs (which only ever looks at outputs/, once per turn). Needed
+    because a file may exist ONLY on the sandbox host and not locally yet —
+    e.g. run_python wrote it earlier in the SAME turn, before the once-per-turn
+    sync has run, or it lives in work/ (never synced back at all). Returns None
+    if the file doesn't exist there (404) or the service is unreachable —
+    callers should fall back to whatever local copy they already have, if any."""
+    if not SANDBOX_SERVICE_URL:
+        return None
+    url = f"{SANDBOX_SERVICE_URL}/fs/{user_id}/{conversation_id}/{rel_path}"
+    try:
+        async with httpx.AsyncClient(timeout=_timeout()) as client:
+            resp = await client.get(
+                url, headers={"Authorization": f"Bearer {SANDBOX_SERVICE_TOKEN}"})
+            return resp.content if resp.status_code == 200 else None
+    except httpx.HTTPError as e:
+        logger.error("sandbox.pull_file_failed", path=rel_path, error=str(e))
+        return None
+
+
 async def sync_outputs(user_id: str, conversation_id: str, local_outputs: Path) -> list[str]:
     """Pull files generated on the sandbox host into the LOCAL outputs/ dir.
 
