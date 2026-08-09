@@ -47,6 +47,7 @@ from core.database import messages_collection, conversations_collection
 from services.history_service import HistoryService
 from services.prompt_builder import PromptBuilder
 from services.memory_service import MemoryService
+from services.conversation_summary_service import ConversationSummaryService
 from services.credit_service import CreditService, CREDIT_GRACE_USD
 from services.langsmith_service import LangSmithService
 from services.turn_manager import turn_manager
@@ -346,6 +347,10 @@ class ChatService:
             # Semantic memory — only retrieve relevant memories
             user_memories = await MemoryService.get_relevant_memories(user_id, message)
 
+            # Running summary of anything that's aged out of the history
+            # window above — see ConversationSummaryService for why.
+            conversation_summary = await ConversationSummaryService.get_summary(conversation_id)
+
             # ── Step 5: Build system prompt ─────────────────────────────
             mcp_resources, mcp_prompts = await cls._fetch_mcp_context(user_id, mcp_server_ids)
             system_prompt = PromptBuilder.assemble(
@@ -353,6 +358,7 @@ class ChatService:
                 mcp_resources=mcp_resources,
                 mcp_prompts=mcp_prompts,
                 user_memories=user_memories,
+                conversation_summary=conversation_summary,
                 # Note: active_skill_body is injected by the subgraph directly
             )
 
@@ -811,6 +817,16 @@ class ChatService:
                     ai_response=full_response,
                 ),
                 name="memory_extraction",
+            )
+
+            # ── Step 9b: Fold any newly-aged-out history into the running
+            # conversation summary (tracked bg task) — no-ops until enough
+            # messages have actually fallen out of HistoryService's window ──
+            spawn(
+                ConversationSummaryService.maybe_update_summary(
+                    conversation_id=conversation_id, user_id=user_id,
+                ),
+                name="conversation_summary",
             )
 
             await HistoryService.invalidate(conversation_id)

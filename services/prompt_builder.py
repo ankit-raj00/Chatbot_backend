@@ -65,7 +65,16 @@ class PromptBuilder:
             section += f"- {mem.get('topic', '')}: {mem.get('content', '')}\n"
         return section + "\n"
 
-
+    @staticmethod
+    def build_conversation_summary_section(summary: str) -> str:
+        """Build the "Earlier in this conversation" section from
+        ConversationSummaryService's running summary — covers messages that
+        have aged out of HistoryService's most-recent-window and would
+        otherwise be invisible to the agent. Returns "" when there's none yet
+        (short conversations never generate one)."""
+        if not summary:
+            return ""
+        return f"### Earlier in this conversation (summarized — some detail was condensed)\n{summary}\n\n"
 
     @classmethod
     def assemble(
@@ -74,9 +83,11 @@ class PromptBuilder:
         mcp_resources: list[dict] = None,
         mcp_prompts: list[dict] = None,
         user_memories: list[dict] = None,
+        conversation_summary: str = "",
     ) -> str:
         """Assemble the complete system prompt from all sections."""
-        core   = cls.build_core_system_prompt(enabled_tools)
-        mcp    = cls.build_mcp_context_section(mcp_resources or [], mcp_prompts or [])
-        memory = cls.build_memory_section(user_memories or [])
-        return f"{core}\n{memory}{mcp}".strip()
+        core    = cls.build_core_system_prompt(enabled_tools)
+        mcp     = cls.build_mcp_context_section(mcp_resources or [], mcp_prompts or [])
+        memory  = cls.build_memory_section(user_memories or [])
+        summary = cls.build_conversation_summary_section(conversation_summary)
+        return f"{core}\n{summary}{memory}{mcp}".strip()
