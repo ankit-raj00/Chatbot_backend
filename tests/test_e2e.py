@@ -196,6 +196,35 @@ class TestE2Auth:
             r = client.get("/auth/me")
             assert r.status_code in (401, 403)
 
+    def test_e2_07_credits_route_exists_and_requires_auth(self):
+        """GET /api/users/credits must be registered and reject anonymous
+        requests -- same shape as /auth/me above."""
+        from main import app
+        assert "/api/users/credits" in _all_route_paths(app)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            r = client.get("/api/users/credits")
+            assert r.status_code in (401, 403)
+
+    def test_e2_08_credits_route_returns_spend_and_cap(self):
+        """Authenticated: returns the current user's own spend/cap, not the
+        admin-only /admin/users shape -- this is the whole point of the
+        route (a regular user previously had no way to see this at all)."""
+        from main import app
+        from core.middleware import get_current_user
+
+        app.dependency_overrides[get_current_user] = lambda: {"_id": "507f1f77bcf86cd799439011"}
+        try:
+            with patch("services.credit_service.CreditService.get_spend", AsyncMock(return_value=1.234567)), \
+                 patch("services.credit_service.CreditService.get_cap", AsyncMock(return_value=5.0)), \
+                 patch("services.credit_service.CreditService._is_admin", AsyncMock(return_value=False)):
+                with TestClient(app, raise_server_exceptions=False) as client:
+                    r = client.get("/api/users/credits")
+            assert r.status_code == 200
+            body = r.json()
+            assert body == {"used_usd": 1.234567, "cap_usd": 5.0, "is_admin": False}
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
+
 
 # ══════════════════════════════════════════════════════════════
 # E4 — Skill System
