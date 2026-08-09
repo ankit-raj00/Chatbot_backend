@@ -66,16 +66,17 @@ _LOOP_MAX_IDENTICAL = 3
 # model sees the pattern and can course-correct, without blocking execution
 # (unlike the hard identical-args block — these ARE different commands, some
 # of which may still be legitimate).
-_LOOP_NUDGE_TOOLS = {"run_shell", "run_python", "search_knowledge_base", "list_skills"}
+_LOOP_NUDGE_TOOLS = {"sandbox_run_shell", "sandbox_run_python", "search_knowledge_base", "list_skills"}
 _LOOP_NUDGE_THRESHOLD = 5
 
 # Even broader guardrail: a model avoiding the per-tool threshold above by
 # HOPPING between different exploration tools (search_knowledge_base, then
-# run_shell, then list_skills, then back to search_knowledge_base...) never
-# trips any single-tool counter, yet still burns through the graph's
+# sandbox_run_shell, then list_skills, then back to search_knowledge_base...)
+# never trips any single-tool counter, yet still burns through the graph's
 # recursion_limit and dies on a hard "step limit reached" error instead of
 # ever answering. Proven live: a user with zero ingested documents alternated
-# search_knowledge_base/run_shell/list_skills for 270+s and never converged.
+# search_knowledge_base/run_shell/list_skills for 270+s and never converged
+# (tool names as observed at the time; renamed since, same tools).
 # Count ALL calls to ANY tool in this combined set, regardless of which one,
 # and nudge once the total crosses the threshold.
 _LOOP_NUDGE_COMBINED_THRESHOLD = 8
@@ -407,7 +408,7 @@ async def agent_tool_node(state: ChatState, config: RunnableConfig) -> dict:
                 output = await cached_invoke(name, args, _run)
             await run_post_tool_hooks(name, output, timer.elapsed_ms, user_id)
             
-            if name in ("run_python", "run_shell"):
+            if name in ("sandbox_run_python", "sandbox_run_shell"):
                 from utils.workspace import workspace_for
                 from utils.workspace_cleanup import touch_last_active
                 ws = workspace_for(user_id)
@@ -423,7 +424,7 @@ async def agent_tool_node(state: ChatState, config: RunnableConfig) -> dict:
             if name in _LOOP_NUDGE_TOOLS and isinstance(tool_content, str):
                 same_count = _same_tool_call_count(state["messages"], name) + 1
                 if same_count == _LOOP_NUDGE_THRESHOLD:
-                    if name in ("run_shell", "run_python"):
+                    if name in ("sandbox_run_shell", "sandbox_run_python"):
                         tool_content += (
                             f"\n\n⚠️ NOTICE: you've called '{name}' {same_count} times this turn without "
                             f"a clear result. If you're looking for content the user referred to as 'my "
@@ -445,7 +446,7 @@ async def agent_tool_node(state: ChatState, config: RunnableConfig) -> dict:
                     if combined_count == _LOOP_NUDGE_COMBINED_THRESHOLD:
                         tool_content += (
                             f"\n\n⚠️ NOTICE: you've made {combined_count} exploration/search tool calls "
-                            f"this turn (across search_knowledge_base, run_shell, run_python, list_skills "
+                            f"this turn (across search_knowledge_base, sandbox_run_shell, sandbox_run_python, list_skills "
                             f"combined) without reaching an answer. STOP exploring now — give the user "
                             f"your best final answer immediately, clearly stating what you found (or that "
                             f"you found nothing, e.g. no matching documents in their knowledge base). "

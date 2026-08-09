@@ -15,7 +15,7 @@ def make_read_file_natively_tool(user_id: str, conversation_id: str):
             through a tool result on this platform, so this tool will not return
             the picture.)
           - NON-IMAGE files (CSV, PDF, code, data) live in your sandbox — read
-            them with run_python / run_shell.
+            them with sandbox_run_python / sandbox_run_shell.
 
         This tool only returns guidance text pointing you at the right approach.
 
@@ -45,7 +45,7 @@ def make_read_file_natively_tool(user_id: str, conversation_id: str):
                     return (
                         f"'{sandbox_path}' is not an image (mime: {mime_type or 'unknown'}). "
                         f"Read it from your sandbox, e.g. "
-                        f"run_python(\"print(open('{att_path or sandbox_path}').read()[:2000])\") "
+                        f"sandbox_run_python(\"print(open('{att_path or sandbox_path}').read()[:2000])\") "
                         f"or with pandas for tabular data."
                     )
 
@@ -58,6 +58,6 @@ def make_read_file_natively_tool(user_id: str, conversation_id: str):
     return StructuredTool.from_function(
         coroutine=read_file_natively,
         name="read_file_natively",
-        description="Guidance on accessing an uploaded file. Uploaded images are already visible to you directly (no tool needed); non-image files are read via run_python/run_shell.",
+        description="Guidance on accessing an uploaded file. Uploaded images are already visible to you directly (no tool needed); non-image files are read via sandbox_run_python/sandbox_run_shell.",
         args_schema=ReadFileNativelyInput
     )

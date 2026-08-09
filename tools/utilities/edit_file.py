@@ -45,12 +45,12 @@ def make_edit_file_tool(user_id: str, conversation_id: str):
         replace_all: bool = Field(default=False, description="Replace every occurrence instead of requiring exactly one.")
 
     @tool(args_schema=EditFileInput)
-    async def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
+    async def sandbox_edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
         """
         Make a targeted edit to an existing file WITHOUT rewriting its whole
-        content. Prefer this over run_python for fixing/adjusting a file you
-        (or the user) already created — it's far cheaper and less error-prone
-        than re-emitting the entire file.
+        content. Prefer this over sandbox_run_python for fixing/adjusting a
+        file you (or the user) already created — it's far cheaper and less
+        error-prone than re-emitting the entire file.
 
         The file must already exist. old_string must match the file's current
         content exactly (whitespace included) — read the file first if unsure
@@ -63,7 +63,7 @@ def make_edit_file_tool(user_id: str, conversation_id: str):
 
         target = (ws_root / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
         # Centralized in utils/hooks.py (Tier 2.3) — same reasoning as run_shell.py.
-        block_reason = check_sandbox_path("edit_file", {"path": path}, user_id, conversation_id)
+        block_reason = check_sandbox_path("sandbox_edit_file", {"path": path}, user_id, conversation_id)
         if block_reason:
             return f"BLOCKED: {block_reason}"
 
@@ -111,4 +111,4 @@ def make_edit_file_tool(user_id: str, conversation_id: str):
         added, removed = _count_diff_lines(original, updated)
         return f"Edited {path} (+{added} -{removed} lines)"
 
-    return edit_file
+    return sandbox_edit_file

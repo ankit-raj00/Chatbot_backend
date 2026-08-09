@@ -17,7 +17,7 @@ def make_run_shell_tool(user_id: str, conversation_id: str):
     cwd = str(conversation_workspace_for(user_id, conversation_id))
 
     @tool
-    async def run_shell(command: str) -> str:
+    async def sandbox_run_shell(command: str) -> str:
         """
         Execute a shell command inside the user's sandboxed workspace
         directory and return combined stdout+stderr.
@@ -65,9 +65,9 @@ def make_run_shell_tool(user_id: str, conversation_id: str):
                 lines.append(item["line"])
                 await adispatch_custom_event(
                     "exec_output",
-                    {"tool": "run_shell", "line": item["line"], "stream": item["stream"]},
+                    {"tool": "sandbox_run_shell", "line": item["line"], "stream": item["stream"]},
                 )
                 
         return "\n".join(lines) or "(no output)"
 
-    return run_shell
+    return sandbox_run_shell
