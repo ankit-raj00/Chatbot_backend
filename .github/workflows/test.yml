@@ -8,6 +8,7 @@ on:
     branches: ["**"]
   pull_request:
     branches: ["**"]
+  workflow_dispatch:   # lets you (or `gh workflow run test.yml`) trigger a re-run manually
 
 jobs:
   test:
