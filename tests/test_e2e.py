@@ -61,6 +61,38 @@ description: Missing name field
 Short body.
 """
 
+def _all_route_paths(app) -> set[str]:
+    """Every concrete endpoint path FastAPI actually serves, recursing into
+    included routers.
+
+    Newer Starlette/FastAPI (unpinned in requirements.txt until 2026-08-09,
+    so this genuinely varies by when `pip install` last ran) wraps each
+    app.include_router(...) call in a `_IncludedRouter` object that exposes
+    neither `.path` NOR `.routes` directly -- the real APIRoute objects with
+    their already-prefixed paths (e.g. "/auth/signup", not just "/signup")
+    live at `.original_router.routes`. Plain top-level routes (the OpenAPI/
+    docs endpoints, "/", "/health") still have `.path` directly and no
+    `original_router`. Confirmed live: iterating app.routes and reading
+    `.path` unconditionally crashed with AttributeError on a fresh CI
+    install; filtering those out silently (rather than recursing) made every
+    included-router endpoint (signup, login, chat/stream, ...) invisible to
+    these tests instead, which would have made this whole test class rubber-stamp
+    a route that had actually gone missing."""
+    paths = set()
+    for r in app.routes:
+        path = getattr(r, "path", None)
+        if path is not None:
+            paths.add(path)
+            continue
+        original = getattr(r, "original_router", None)
+        if original is not None and hasattr(original, "routes"):
+            for sub in original.routes:
+                sub_path = getattr(sub, "path", None)
+                if sub_path is not None:
+                    paths.add(sub_path)
+    return paths
+
+
 # ══════════════════════════════════════════════════════════════
 # E1 — App Startup & Health
 # ══════════════════════════════════════════════════════════════
@@ -77,19 +109,19 @@ class TestE1AppHealth:
     def test_e1_02_root_endpoint_schema(self):
         """Root endpoint must be registered."""
         from main import app
-        routes = {r.path for r in app.routes}
+        routes = _all_route_paths(app)
         assert "/" in routes
 
     def test_e1_03_health_endpoint_registered(self):
         """Health endpoint must be registered."""
         from main import app
-        routes = {r.path for r in app.routes}
+        routes = _all_route_paths(app)
         assert "/health" in routes
 
     def test_e1_04_all_routers_registered(self):
         """All expected API path prefixes must be present."""
         from main import app
-        paths = {r.path for r in app.routes}
+        paths = _all_route_paths(app)
         # Sample of expected paths
         expected_prefixes = [
             "/auth/signup", "/auth/login",
@@ -130,17 +162,17 @@ class TestE2Auth:
 
     def test_e2_01_signup_route_exists(self):
         from main import app
-        paths = [r.path for r in app.routes]
+        paths = _all_route_paths(app)
         assert "/auth/signup" in paths
 
     def test_e2_02_login_route_exists(self):
         from main import app
-        paths = [r.path for r in app.routes]
+        paths = _all_route_paths(app)
         assert "/auth/login" in paths
 
     def test_e2_03_me_route_exists(self):
         from main import app
-        paths = [r.path for r in app.routes]
+        paths = _all_route_paths(app)
         assert "/auth/me" in paths
 
     def test_e2_04_signup_returns_422_on_empty_body(self):
