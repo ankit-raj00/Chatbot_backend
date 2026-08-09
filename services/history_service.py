@@ -89,8 +89,16 @@ class HistoryService:
         if exclude_msg_id is not None:
             query["_id"] = {"$ne": exclude_msg_id}
 
-        cursor = messages_collection.find(query).sort("timestamp", 1)
+        # Sort DESCENDING to take the MOST RECENT MAX_HISTORY_MESSAGES from the
+        # cursor, then reverse back to chronological order for the LLM. The
+        # previous ascending sort + to_list(N) took the OLDEST N messages
+        # instead — for any conversation past 30 stored messages, the agent's
+        # history was silently frozen at the first ~15 exchanges forever,
+        # regardless of how long the conversation continued. Confirmed via a
+        # direct 35-message probe: returned messages 0-29, not 5-34.
+        cursor = messages_collection.find(query).sort("timestamp", -1)
         stored = await cursor.to_list(length=MAX_HISTORY_MESSAGES)
+        stored.reverse()
 
         messages = []
         for msg in stored:
