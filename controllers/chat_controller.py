@@ -14,6 +14,7 @@ from fastapi import HTTPException
 
 from services.chat_service import ChatService
 from config.model_config import ModelConfig
+from utils import sandbox_client
 
 import structlog
 logger = structlog.get_logger(__name__)
@@ -157,6 +158,21 @@ class ChatController:
                     tmp_path = tmp.name
 
                 sandbox_path = self._save_to_sandbox(user_id, conversation_id, file_obj.filename, content)
+
+                # Remote mode: code the agent runs executes on the sandbox host,
+                # not here, so the upload has to be pushed there too or
+                # run_python/analyze_image would see a FileNotFoundError for a
+                # file that's sitting right here in the local workspace.
+                # Best-effort: a push failure surfaces as a normal missing-file
+                # error from the tool call, not a broken upload — the local
+                # copy (used by analyze_image, which stays backend-local) is
+                # unaffected either way.
+                if sandbox_client.is_remote():
+                    pushed = await sandbox_client.push_file(user_id, conversation_id, sandbox_path, content)
+                    if not pushed:
+                        logger.error(f"sandbox push failed for {file_obj.filename} "
+                                     f"(conversation {conversation_id}) — remote code execution "
+                                     f"won't be able to read this upload")
 
                 cloudinary_url, public_id = None, None
                 try:
