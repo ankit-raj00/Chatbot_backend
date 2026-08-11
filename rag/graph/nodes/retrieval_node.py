@@ -151,14 +151,23 @@ async def parallel_retrieve_node(state: RAGGraphState) -> RAGGraphState:
 
     question = state["question"]
     selected_file_ids = state.get("selected_file_ids")
+    user_id = state.get("user_id")
 
     # ── Task 1: Qdrant vector search ─────────────────────────────
     async def run_qdrant():
         node = RetrievalNode()
-        # Use asyncio.to_thread because retrieve() is synchronous
+        # Use asyncio.to_thread because retrieve() is synchronous.
+        # user_id MUST be forwarded here — RetrievalNode.retrieve()'s own
+        # tenancy guard refuses to search without it, and this sub-state is
+        # built fresh (not **state), so omitting it silently zeroed out
+        # vector search on every call regardless of what the outer graph
+        # state actually carried. Confirmed live: this was the real root
+        # cause of "No documents after parallel retrieval" even after
+        # routes/rag_routes.py was fixed to pass user_id into the graph.
         result_state = await asyncio.to_thread(node.retrieve, {
             "question": question,
             "selected_file_ids": selected_file_ids,
+            "user_id": user_id,
             "documents": [], "generation": None,
             "web_search_needed": False,
             "hallucination_count": 0, "retry_count": 0, "messages": []
