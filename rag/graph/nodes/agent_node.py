@@ -1,3 +1,4 @@
+from typing import List, Optional
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.tools import tool
@@ -13,13 +14,58 @@ import os
 import structlog
 logger = structlog.get_logger(__name__)
 
+
+def _bind_search_tool(user_id: Optional[str]):
+    """
+    Returns a search_knowledge_base wrapper with user_id pre-bound to the
+    authenticated request's id, so the model's tool schema never exposes
+    user_id as a model-fillable argument.
+
+    SECURITY: mirrors graph/nodes/agent_tool_node.py's forced-injection
+    principle (never trust the LLM to supply a tenancy-critical value) —
+    adapted for create_react_agent, which (unlike agent_tool_node's own
+    manual tool-call loop) gives no per-call hook to inject arguments before
+    a bound tool executes. Confirmed live: without this, search_knowledge_base
+    self-rejected with "called without user_id — refusing (tenancy guard)"
+    whenever the model called it directly (e.g. after the initial retrieval
+    got filtered out by the grader), since the LLM was never given a real
+    user_id to pass and the tool refuses to search with none.
+    """
+    @tool("search_knowledge_base")
+    def search_knowledge_base_bound(
+        query: str,
+        selected_files: Optional[List[str]] = None,
+        limit: int = 5,
+        offset: int = 0,
+    ) -> list:
+        """
+        Searches the knowledge base (Vector DB) for relevant context.
+
+        Args:
+            query: The semantic search query.
+            selected_files: List of file UUIDs to restrict search to. If empty
+                             or None, searches all of the current user's files.
+            limit: Number of chunks to return (default: 5).
+            offset: Pagination offset (default: 0).
+
+        Returns chunks with content/source/section/page/figures/score — cite
+        the source and section when answering, and embed any figure as
+        markdown: ![filename](url).
+        """
+        return search_knowledge_base.func(
+            query=query, selected_files=selected_files, limit=limit,
+            offset=offset, user_id=user_id,
+        )
+    return search_knowledge_base_bound
+
+
 class AgentNode:
     """
     The 'Brain' of the Agentic RAG.
     Replaces the simple GenerationNode.
     Uses a ReAct Loop to reason about data and call tools if needed.
     """
-    
+
     def __init__(self):
         # 1. Initialize LLM
         self.llm = ChatGoogleGenerativeAI(
@@ -28,29 +74,26 @@ class AgentNode:
             google_api_key=os.getenv("GOOGLE_API_KEY"),
             convert_system_message_to_human=True
         )
-        
-        # 2. Bind Tools
-        # We need to wrap our python functions as LangChain Tools
-        # Using the @tool decorator or StructuredTool is standard.
-        # Since our functions are already clean, we can just pass them if they have type hints.
-        # But 'create_react_agent' expects proper Tools.
-        
-        self.tools = [search_knowledge_base, read_document_page]
-        
-        # 3. Create Internal Agent Graph
-        # This graph runs the "Reason -> Act -> Observe" loop
-        self.agent_executor = create_react_agent(self.llm, self.tools)
-        
+        # Tools/agent_executor are built per-call in generate() now, not here —
+        # search_knowledge_base must be bound to the authenticated user_id of
+        # each individual request, and this AgentNode instance is a shared
+        # singleton (one RAGWorkflow serves every request).
+
     async def generate(self, state: RAGGraphState) -> RAGGraphState:
         """
         Executes the Agentic Loop.
         Input context is provided as the "Initial Observation".
         """
         logger.info("🤖 AgentNode: Starting Reasoning Loop...")
-        
+
         question = state["question"]
         documents = state.get("documents", [])
-        
+        user_id = state.get("user_id")
+
+        # Built per-call: search_knowledge_base_bound closes over THIS
+        # request's user_id (see _bind_search_tool's docstring).
+        agent_executor = create_react_agent(self.llm, [_bind_search_tool(user_id), read_document_page])
+
         # Construct Initial Context String
         # The agent sees what the RetrievalNode found first.
         context_str = "\n\n".join([
@@ -90,7 +133,7 @@ class AgentNode:
             ]}
             
             # ainvoke returns a dictionary with 'messages' (the full history)
-            result = await self.agent_executor.ainvoke(inputs)
+            result = await agent_executor.ainvoke(inputs)
             
             # Extract Final Answer
             # The last message in the history is the AI's final response

@@ -15,7 +15,18 @@ logger = structlog.get_logger(__name__)
 
 PARSER_SERVICE_URL = os.getenv("PARSER_SERVICE_URL", "http://52.207.56.41/parser")
 PARSER_SERVICE_KEY = os.getenv("PARSER_SERVICE_KEY", os.getenv("OMNIROUTE_API_KEY", ""))
-PARSER_TIMEOUT = float(os.getenv("PARSER_TIMEOUT", "1800"))   # big scans are slow
+# The parser's region-VLM calls run strictly sequentially by design (parallel
+# calls trip the gateway's rate limits — see pdf-parser/parser.py's
+# REGION_WORKERS comment), so a heavily-illustrated scan can legitimately take
+# several minutes. But 1800s meant a user could sit waiting nearly 30 minutes
+# on one upload before the LlamaParse fallback ever kicked in — confirmed
+# live: a 15-page scanned book with ~100+ image regions ran into nginx's own
+# 600s proxy_read_timeout on the parser box first anyway (a 504, unrelated to
+# this value), wasting 10 minutes before falling back to a LlamaParse pass
+# that itself took under a minute. Bounded to a more interactive-upload-sized
+# window; nginx's proxy_read_timeout on the parser box is set to match (see
+# TIER2_SANDBOX_PLAN.md / the parser box's /etc/nginx/sites-available/omniroute).
+PARSER_TIMEOUT = float(os.getenv("PARSER_TIMEOUT", "300"))
 
 
 class ParserServiceError(RuntimeError):

@@ -151,7 +151,7 @@ class IngestionService:
             
             # 4. Splitting & Indexing (Brain & Memory) 🧠 + 💾
             logger.info("   🔪 Splitting & Indexing...")
-            self._index_documents(docs, route_config)
+            await self._index_documents(docs, route_config)
             logger.info("   💾 Indexing Complete.")
             
             # 5. Cleanup
@@ -277,7 +277,7 @@ class IngestionService:
                     doc.metadata["user_id"] = user_id
 
             # Splitting & Indexing
-            self._index_documents(docs, route_config)
+            await self._index_documents(docs, route_config)
 
             # Estimate chunks count from standard split
             try:
@@ -424,27 +424,25 @@ class IngestionService:
                 await asyncio.sleep(wait)
                 backoff = min(backoff * 2, EMBED_MAX_BACKOFF)
 
-    def _index_documents(self, docs: List[Document], config: Dict[str, Any]):
+    async def _index_documents(self, docs: List[Document], config: Dict[str, Any]):
         """
         Handles the Chunking and Indexing logic based on strategy.
         """
         chunk_strategy = config["chunking_strategy"]
         chunker_config = config["chunker_config"]
-        
+
         vectorstore = self.qdrant_manager.get_vector_store()
-        
+
         # --- Strategy A: Parent Document Retrieval (Finance/Medical) ---
         if chunk_strategy == "parent_document":
             # ParentDocumentRetriever needs two splitters:
             # 1. Child Splitter (Small chunks for vector search)
             # 2. Parent Splitter (Optional, usually keeping the whole doc or large chunks)
-            
+
             if not ParentDocumentRetriever:
                 logger.warning("ParentDocumentRetriever not available. Falling back to standard indexing.")
                 # Fallback to standard strategy if ParentDocumentRetriever is not enabled
-                # The original _index_documents is not async, so we call the standard strategy directly.
-                # If _index_documents were async, this would be `return await self._process_standard_strategy(docs, config)`
-                self._process_standard_strategy(docs, config)
+                await self._process_standard_strategy(docs, config)
                 return
 
             # The following code is unreachable until ParentDocumentRetriever is enabled
@@ -471,21 +469,41 @@ class IngestionService:
             
         # --- Strategy B: Standard Vector Search (Recursive / Semantic / etc) ---
         else:
-            self._process_standard_strategy(docs, config)
+            await self._process_standard_strategy(docs, config)
 
-    def _process_standard_strategy(self, docs: List[Document], config: Dict[str, Any]):
+    async def _process_standard_strategy(self, docs: List[Document], config: Dict[str, Any]):
         """
         Helper to run standard chunking and indexing (Strategy B).
         Used as fallback for Strategy A or directly for Strategy B.
+
+        Throttled batches + retry-with-backoff — same pattern as
+        _ingest_blocks/_add_documents_with_retry. This used to call
+        vectorstore.add_documents(chunks) in one unthrottled shot, so any
+        document producing enough chunks to cross Google's free-tier
+        embedding quota (100 req/min) crashed ingestion outright instead of
+        backing off — confirmed live with a heavily-illustrated PDF.
         """
         chunk_strategy = config["chunking_strategy"]
         chunker_config = config["chunker_config"]
         vectorstore = self.qdrant_manager.get_vector_store()
-        
+
         # 1. Split
         splitter = self.splitter_factory.get_splitter(chunk_strategy, chunker_config)
         chunks = splitter.split_documents(docs)
-        
-        # 2. Index
-        vectorstore.add_documents(chunks)
+
+        # Deterministic ids (same scheme as _ingest_blocks) so a retry
+        # overwrites the same points instead of duplicating them. Both
+        # callers tag doc.metadata["file_id"] before splitting, and
+        # LangChain's splitters propagate source metadata onto each chunk.
+        ids = [_chunk_id(c.metadata.get("file_id") or "unknown", i) for i, c in enumerate(chunks)]
+
+        # 2. Index — throttled batches + retry-with-backoff.
+        for i in range(0, len(chunks), EMBED_BATCH):
+            batch = chunks[i:i + EMBED_BATCH]
+            await self._add_documents_with_retry(vectorstore, batch, ids[i:i + EMBED_BATCH])
+            done = min(i + EMBED_BATCH, len(chunks))
+            logger.info(f"   💾 embedded {done}/{len(chunks)} chunks (standard strategy)")
+            if done < len(chunks):
+                await asyncio.sleep(EMBED_BATCH_SLEEP)
+
         logger.info(f"Indexed {len(chunks)} chunks using Standard Strategy (Fallback/Direct)")
