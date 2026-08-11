@@ -41,9 +41,9 @@ DEFAULT_MODEL = ModelConfig.DEFAULT_MODEL
 # a detailed PDF with a full architecture flowchart and images, don't leave
 # anything out") — confirmed live cutting off a normal admin turn 3 times in
 # one conversation at $0.51-0.55 accumulated cost, nowhere near a runaway.
-# Raised 4x: still cuts off a genuinely stuck/looping turn well before it
-# gets expensive, while giving legitimate long agentic turns real headroom.
-MAX_TURN_COST_USD = float(os.getenv("MAX_TURN_COST_USD", "2.00"))
+# Raised 10x to $5: still cuts off a genuinely stuck/looping turn well before
+# it gets expensive, while giving legitimate long agentic turns real headroom.
+MAX_TURN_COST_USD = float(os.getenv("MAX_TURN_COST_USD", "5.00"))
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
