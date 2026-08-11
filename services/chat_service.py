@@ -35,11 +35,15 @@ DEFAULT_MODEL = ModelConfig.DEFAULT_MODEL
 # grace buffer — applies to EVERY turn including admin-exempt users (admins
 # skip credit enforcement entirely, so without this there was literally no
 # cost ceiling for them beyond the step-count-based guards in
-# agent_tool_node.py). A generous default: legitimate long agentic turns can
-# still run; a genuinely runaway turn (confirmed live: 22,841 input tokens
-# on a single ordinary, non-adversarial prompt) gets cut off well before it
-# becomes expensive.
-MAX_TURN_COST_USD = float(os.getenv("MAX_TURN_COST_USD", "0.50"))
+# agent_tool_node.py). The original $0.50 default was tuned only against a
+# single-call runaway (22,841 input tokens on one ordinary prompt) and turned
+# out to be far too tight for legitimate multi-step deliverables (e.g. "write
+# a detailed PDF with a full architecture flowchart and images, don't leave
+# anything out") — confirmed live cutting off a normal admin turn 3 times in
+# one conversation at $0.51-0.55 accumulated cost, nowhere near a runaway.
+# Raised 4x: still cuts off a genuinely stuck/looping turn well before it
+# gets expensive, while giving legitimate long agentic turns real headroom.
+MAX_TURN_COST_USD = float(os.getenv("MAX_TURN_COST_USD", "2.00"))
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -141,13 +145,16 @@ class ChatService:
     async def _persist_stopped_message(
         cid: str, user_id: str, content: str, timeline: list,
         input_tokens: int = 0, output_tokens: int = 0, cost_usd: float = 0.0,
+        stop_reason: str = "user_stop",
     ) -> None:
         """Persist a partial assistant message when a turn was stopped/cancelled,
         so the streamed-so-far content isn't lost on reload. A stopped turn
         (whether user-initiated or the credit grace-buffer cutoff) still
         consumed real tokens, so this also records/deducts whatever cost was
         actually accrued — not just $0, or the grace buffer never actually
-        gets billed."""
+        gets billed. `stop_reason` distinguishes an explicit user Stop click
+        from a server-side cost cutoff, so the UI can say something honest
+        instead of implying a connection problem."""
         try:
             await messages_collection.insert_one({
                 "conversation_id": cid,
@@ -156,6 +163,7 @@ class ChatService:
                 "content":         content,
                 "timeline":        timeline,
                 "stopped":         True,
+                "stop_reason":     stop_reason,
                 "input_tokens":    input_tokens,
                 "output_tokens":   output_tokens,
                 "cost_usd":        round(cost_usd, 8),
@@ -506,6 +514,12 @@ class ChatService:
             credit_spend_at_start = 0.0 if credit_is_exempt else await CreditService.get_spend(user_id)
             credit_cap            = 0.0 if credit_is_exempt else await CreditService.get_cap(user_id)
 
+            # Set to a specific reason right before either self-cancel below
+            # fires; stays None for an externally-issued cancel (the Stop
+            # button / turn_manager.request_stop), which the except block
+            # below treats as "user_stop".
+            stop_reason = None
+
             agent_graph = await get_agent_graph()
 
             # Snapshot existing files BEFORE agent runs — name -> mtime, so we catch
@@ -711,6 +725,7 @@ class ChatService:
                                     spend_at_start=credit_spend_at_start,
                                     turn_cost_so_far=turn_cost_so_far, cap=credit_cap,
                                 )
+                                stop_reason = "credit_limit_reached"
                                 asyncio.current_task().cancel()
 
                             # Absolute ceiling — applies unconditionally, even
@@ -722,6 +737,7 @@ class ChatService:
                                     user_id=user_id, turn_id=turn_id,
                                     turn_cost_so_far=turn_cost_so_far, ceiling=MAX_TURN_COST_USD,
                                 )
+                                stop_reason = "turn_cost_ceiling"
                                 asyncio.current_task().cancel()
 
             # ── Step 7a: Pull files generated on the sandbox host ────────────────
@@ -852,9 +868,10 @@ class ChatService:
             in_price  = locals().get("INPUT_PRICE_PER_TOKEN", 0.0) or 0.0
             out_price = locals().get("OUTPUT_PRICE_PER_TOKEN", 0.0) or 0.0
             partial_cost = in_tok * in_price + out_tok * out_price
+            reason = locals().get("stop_reason") or "user_stop"
             if cid and (partial or tl or in_tok or out_tok):
-                await cls._persist_stopped_message(cid, user_id, partial, tl, in_tok, out_tok, partial_cost)
-            turn_manager.publish(turn_id, {'stopped': True})
+                await cls._persist_stopped_message(cid, user_id, partial, tl, in_tok, out_tok, partial_cost, stop_reason=reason)
+            turn_manager.publish(turn_id, {'stopped': True, 'stop_reason': reason})
             turn_manager.finish(turn_id, "stopped")
 
         except Exception as e:
