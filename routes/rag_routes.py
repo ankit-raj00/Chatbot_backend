@@ -30,23 +30,29 @@ class ChatResponse(BaseModel):
     hallucination_warning: bool
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
+async def chat_endpoint(request: ChatRequest, current_user: dict = Depends(get_current_user)):
     """
     Agentic RAG Chat Endpoint.
     Runs the full Retrieve-Grade-Generate-Validate loop.
     """
     try:
-        logger.info(f"Received RAG query: {request.message}")
+        user_id = str(current_user.get("_id"))
+        logger.info(f"Received RAG query: {request.message} (user={user_id})")
         if request.selected_file_ids:
             logger.info(f"Context Filters detected: {len(request.selected_file_ids)} files")
 
-        
-        # Initial State
+
+        # Initial State — user_id is the mandatory tenancy filter (see
+        # RAGGraphState); this endpoint used to omit it entirely, so
+        # retrieval always came back empty (auth-less request, no user to
+        # filter by) and the agent fell back to calling search_knowledge_base
+        # itself with no user context, self-rejecting via its tenancy guard.
         inputs = {
             "question": request.message,
             "retry_count": 0,
             "hallucination_count": 0,
-            "selected_file_ids": request.selected_file_ids  # UUIDs for Qdrant filter
+            "selected_file_ids": request.selected_file_ids,  # UUIDs for Qdrant filter
+            "user_id": user_id,
         }
         
         # Invoke Graph
