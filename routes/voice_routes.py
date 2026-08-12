@@ -25,6 +25,12 @@ router = APIRouter(prefix="/voice", tags=["Voice"])
 # instead of blocking forever on queue.get().
 _END_OF_UTTERANCE = object()
 
+# How often the server pokes an otherwise-silent voice socket. Well under the
+# ~60s idle window typical of mobile carrier NAT and proxies, and well under
+# the client-side watchdog in voiceClient.js, so several heartbeats have to be
+# missed before the client concludes the connection is dead.
+HEARTBEAT_INTERVAL_S = 10.0
+
 
 async def _authenticate_ws(websocket: WebSocket):
     """Mirrors core/middleware.py's get_current_user, adapted for a
@@ -86,6 +92,52 @@ async def voice_ws(
     audio_queue: asyncio.Queue | None = None
     turn_task: asyncio.Task | None = None
 
+    # Every write to this socket goes through here. The heartbeat below runs
+    # in its own task and would otherwise be a SECOND concurrent writer
+    # alongside _run_turn's audio/event sends — the precise "frame
+    # interleaving" hazard the barge-in path further down already documents
+    # and takes care to avoid. One lock makes every writer serialize instead.
+    ws_lock = asyncio.Lock()
+
+    async def _send_json(payload: dict) -> None:
+        async with ws_lock:
+            await websocket.send_json(payload)
+
+    async def _send_bytes(data: bytes) -> None:
+        async with ws_lock:
+            await websocket.send_bytes(data)
+
+    # ── Keepalive ────────────────────────────────────────────────────────
+    # An agent turn goes completely silent on this socket for as long as its
+    # tools take — a single sandbox_analyze_image call is routinely 7-8s, and
+    # a tool-heavy turn strings several of those together with nothing sent
+    # in between. Mobile carrier NAT and intermediate proxies drop a
+    # connection they consider idle, and they drop it HALF-OPEN: the server
+    # sees the client disappear while the browser still believes it is
+    # connected, so the UI sits on "AgentX is speaking..." forever waiting
+    # for audio from a socket that is already gone.
+    #
+    # Confirmed from production logs: a PDF-building turn ran
+    # analyze_image (6.99s) -> analyze_image (6.81s) -> run_python ->
+    # analyze_image (7.88s) and the socket died mid-turn, surfacing as
+    # ClientDisconnected on the next send.
+    #
+    # A periodic tiny frame keeps the connection provably alive and gives
+    # the client something to time out against (see voiceClient.js's
+    # watchdog). Cheap: one small JSON frame every few seconds, only while
+    # the socket is open.
+    async def _heartbeat():
+        try:
+            while True:
+                await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+                await _send_json({"type": "ping"})
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — socket already gone; the main loop handles it
+            return
+
+    heartbeat_task = asyncio.create_task(_heartbeat())
+
     async def _queue_to_chunks(queue: asyncio.Queue):
         # Takes the queue as an ARGUMENT rather than closing over the
         # `audio_queue` local: a closure reads the variable's CURRENT value
@@ -119,11 +171,20 @@ async def voice_ws(
             async for event in gen:
                 etype = event.get("type")
                 if etype == "audio_chunk":
-                    await websocket.send_bytes(event["data"])
+                    await _send_bytes(event["data"])
                 else:
-                    await websocket.send_json(event)
+                    await _send_json(event)
         except asyncio.CancelledError:
-            await websocket.send_json({"type": "interrupted"})
+            # Best-effort: a turn is very often cancelled BECAUSE the socket
+            # died, in which case this send raises WebSocketDisconnect and,
+            # since the exception then escapes a task nobody awaits, surfaces
+            # as a bare "Task exception was never retrieved" traceback in the
+            # logs — noise that looks like a crash but is just a client that
+            # left. Seen in production on exactly that path.
+            try:
+                await _send_json({"type": "interrupted"})
+            except Exception:  # noqa: BLE001
+                pass
             raise
         except Exception as e:  # noqa: BLE001 — never let one bad turn kill the socket
             # str(e) alone can render blank for some exception types (e.g.
@@ -132,7 +193,7 @@ async def voice_ws(
             logger.error("voice.ws.turn_failed", user_id=user_id,
                          error=f"{type(e).__name__}: {e}", exc_info=True)
             try:
-                await websocket.send_json({"type": "error", "message": "Something went wrong processing that."})
+                await _send_json({"type": "error", "message": "Something went wrong processing that."})
             except Exception:
                 pass
         finally:
@@ -206,7 +267,7 @@ async def voice_ws(
                         # so no turn exists. Say so explicitly — otherwise the
                         # client sits in "Thinking…" forever waiting for a
                         # response that nothing is going to produce.
-                        await websocket.send_json({"type": "done", "response_text": "", "cost_usd": 0.0})
+                        await _send_json({"type": "done", "response_text": "", "cost_usd": 0.0})
 
                 elif ctype == "interrupt":
                     if turn_task and not turn_task.done():
@@ -231,6 +292,7 @@ async def voice_ws(
     except WebSocketDisconnect:
         pass
     finally:
+        heartbeat_task.cancel()
         if turn_task and not turn_task.done():
             turn_task.cancel()
         logger.info("voice.ws.disconnected", user_id=user_id)
