@@ -125,8 +125,27 @@ class TurnSpeaker:
             first = await self._take()
             if first is None:
                 return
-            async for audio in self._synthesize_stream(self._burst(first), voice_id=self._voice_id):
-                yield audio
+            try:
+                async for audio in self._synthesize_stream(self._burst(first),
+                                                           voice_id=self._voice_id):
+                    yield audio
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                # One failed BURST must not silence the whole turn. This used
+                # to propagate straight out of stream(), where pipeline.py's
+                # _pump_audio caught it and ended audio for good — so a single
+                # provider hiccup during the first narration line left an
+                # otherwise healthy multi-minute agentic turn completely mute
+                # (observed: 3.17s of audio in a 77s turn, then nothing).
+                #
+                # An agent turn is many independent bursts; losing one line is
+                # a far better outcome than losing every line after it, and
+                # the next burst opens a fresh vendor session anyway, so there
+                # is no broken state to carry forward.
+                logger.error("voice.speaker.burst_failed",
+                             error=f"{type(e).__name__}: {e}", exc_info=True)
+                continue
 
     async def aclose(self) -> None:
         """Stops the agent-side pump. Called when the turn is torn down for
