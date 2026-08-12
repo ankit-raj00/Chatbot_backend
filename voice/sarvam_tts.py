@@ -93,6 +93,11 @@ async def synthesize_stream(
         # got its matching final back AND the sender has nothing left to
         # send", not "a final event arrived".
         flushes_sent = 0
+        finals_received = 0
+        # Set the moment the sender has pushed its last flush. The receive
+        # loop needs this as an explicit SIGNAL rather than a task state it
+        # only happens to observe -- see the completion race below.
+        sender_finished = asyncio.Event()
 
         async def _sender():
             nonlocal flushes_sent
@@ -117,14 +122,38 @@ async def synthesize_stream(
                 await ws.send(json.dumps({"type": "flush"}))
                 flushes_sent += 1
                 sent_any = True
+            sender_finished.set()
             if not sent_any:
                 # Nothing was ever said — close cleanly rather than hang
                 # waiting for a "final" event that will never come, since
                 # nothing was ever sent to trigger one.
                 await ws.close()
+                return
+            # THE AGENTIC-TURN FIX. The receive loop can only test its exit
+            # condition when a message arrives, so if the last `final` landed
+            # while this sender was still waiting on the next sentence, that
+            # test already happened -- and saw a sender that wasn't finished
+            # yet. Nothing further will ever be sent or received, so the loop
+            # would block on a socket that is now permanently silent until
+            # Sarvam kills it with `408 Websocket was left open without any
+            # messages for too long`, which surfaced as
+            # voice.pipeline.audio_pump_failed and left the REST OF THE TURN
+            # with no audio at all.
+            #
+            # This is why tool-calling turns misbehaved while plain
+            # conversational ones did not: a conversational turn's text
+            # stream ends immediately, so the sender is already finished by
+            # the time the final arrives and the loop's own check fires
+            # correctly. An agentic turn's burst sits in TurnSpeaker's 1.5s
+            # idle wait, which makes losing that race the NORMAL case.
+            #
+            # Closing here releases the loop. Both orderings are now covered:
+            # final-then-sender ends it here, sender-then-final ends it via
+            # the loop's check on sender_finished.
+            if finals_received >= flushes_sent:
+                await ws.close()
 
         sender_task = asyncio.create_task(_sender())
-        finals_received = 0
 
         try:
             async for raw in ws:
@@ -142,10 +171,14 @@ async def synthesize_stream(
                 elif mtype == "event":
                     if (msg.get("data") or {}).get("event_type") == "final":
                         finals_received += 1
-                        if sender_task.done() and finals_received >= flushes_sent:
+                        if sender_finished.is_set() and finals_received >= flushes_sent:
                             break
-        except websockets.exceptions.ConnectionClosedOK:
-            pass  # the "nothing was ever said" close() path above
+        except websockets.exceptions.ConnectionClosed:
+            # Covers both the "nothing was ever said" close above and the
+            # completion close the sender now performs — the receive loop is
+            # mid-iteration when either happens, so a clean close arriving
+            # there is the expected way this generator finishes, not a fault.
+            pass
         finally:
             if not sender_task.done():
                 sender_task.cancel()
