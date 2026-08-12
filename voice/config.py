@@ -1,0 +1,102 @@
+"""Env-driven config for the voice pipeline — mirrors the pattern used
+throughout this codebase (e.g. rag/parsers/parser_client.py) of module-level
+constants read once from os.getenv with sane defaults."""
+import os
+
+# ── Provider selection ──────────────────────────────────────────────────
+# Sarvam is the default for both legs: it fixed a real accuracy complaint on
+# Indian-accented speech (Deepgram Flux was mishearing it) and — verified
+# live via a real TTS->STT round trip — correctly handles code-mixed
+# Hindi/English ("Hinglish") with the meaning fully intact, which neither
+# Deepgram nor Cartesia can do at all. Deepgram/Cartesia code is left in
+# place and selectable via env, not deleted — there was nothing wrong with
+# them technically (Cartesia in particular measured ~2x lower TTS latency
+# live), the switch is about matching the actual target users' speech.
+STT_PROVIDER = os.getenv("VOICE_STT_PROVIDER", "sarvam")  # "sarvam" | "deepgram"
+TTS_PROVIDER = os.getenv("VOICE_TTS_PROVIDER", "sarvam")  # "sarvam" | "cartesia"
+
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
+# REST /v1/listen (one-shot transcription) and the live /v2/listen streaming
+# API use ENTIRELY DIFFERENT model families — v1 takes "nova-*", v2 only
+# accepts "flux-general-en"/"flux-general-multi" (confirmed live: nova-3 on
+# v2 gets rejected with a bare HTTP 400 "Unexpected error when initializing
+# websocket connection", no further detail, right at the WS handshake).
+DEEPGRAM_MODEL = os.getenv("DEEPGRAM_MODEL", "nova-3")
+DEEPGRAM_STREAM_MODEL = os.getenv("DEEPGRAM_STREAM_MODEL", "flux-general-en")
+
+CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY", "")
+CARTESIA_VERSION = os.getenv("CARTESIA_VERSION", "2024-06-10")
+CARTESIA_MODEL = os.getenv("CARTESIA_MODEL", "sonic-2")
+# Default voice — a stock Cartesia voice id. Overridable per-request later
+# (e.g. a user-selectable voice), env default just for this build/test.
+CARTESIA_VOICE_ID = os.getenv("CARTESIA_VOICE_ID", "694f9389-aac1-45b6-b726-9d9369183238")
+CARTESIA_SAMPLE_RATE = int(os.getenv("CARTESIA_SAMPLE_RATE", "24000"))
+
+CARTESIA_WS_URL = "wss://api.cartesia.ai/tts/websocket"
+CARTESIA_REST_URL = "https://api.cartesia.ai/tts/bytes"
+DEEPGRAM_REST_URL = "https://api.deepgram.com/v1/listen"
+
+# ── Sarvam ───────────────────────────────────────────────────────────────
+# Every field below was pulled from the ACTUAL sarvamai SDK source
+# (raw_client.py / socket_client.py / types/*.py) and confirmed against the
+# real API, not guessed from docs — docs describe an SDK-wrapped call shape,
+# not the literal wire protocol, and the docs example speaker ("anushka")
+# turned out to not even be valid for bulbul:v3 (confirmed live: 422 from
+# the real API, which also usefully listed the actual valid v3 roster).
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
+SARVAM_TTS_WS_URL = "wss://api.sarvam.ai/text-to-speech/ws"
+SARVAM_STT_WS_URL = "wss://api.sarvam.ai/speech-to-text/ws"
+
+SARVAM_TTS_MODEL = os.getenv("SARVAM_TTS_MODEL", "bulbul:v3")
+# One of the roster returned by a live 422 against bulbul:v3 (anushka/
+# manisha/etc are bulbul:v2-only despite being the docs' example default).
+SARVAM_TTS_SPEAKER = os.getenv("SARVAM_TTS_SPEAKER", "shubh")
+SARVAM_TTS_LANGUAGE_CODE = os.getenv("SARVAM_TTS_LANGUAGE_CODE", "hi-IN")
+SARVAM_TTS_SAMPLE_RATE = int(os.getenv("SARVAM_TTS_SAMPLE_RATE", "24000"))
+
+SARVAM_STT_MODEL = os.getenv("SARVAM_STT_MODEL", "saaras:v3")
+# codemix = "English words in English script and Indic words in native
+# script" — confirmed live via a real TTS->STT round trip on a Hinglish
+# sentence: 100% of the meaning survived (the model transliterated the
+# English loanwords into Devanagari rather than keeping Latin script, which
+# is a legitimate natural rendering of spoken Hindi, not an error).
+SARVAM_STT_MODE = os.getenv("SARVAM_STT_MODE", "codemix")
+SARVAM_STT_LANGUAGE_CODE = os.getenv("SARVAM_STT_LANGUAGE_CODE", "hi-IN")
+# The STT WS connection-level sample_rate param ONLY accepts 8000/16000
+# (confirmed live: 24000 gets an immediate close with code 4000
+# "Unsupported sample rate: 24000. Supported rates: 8000, 16000") — unlike
+# the TTS side, which does accept 24000. Matches voice/stt.py's existing
+# 16kHz mic-capture default, so no resampling is needed either way.
+SARVAM_STT_SAMPLE_RATE = int(os.getenv("SARVAM_STT_SAMPLE_RATE", "16000"))
+
+
+def require_keys() -> None:
+    """Fail loudly at pipeline construction time, not mid-turn, if a
+    required provider key is missing — matches this codebase's fail-fast
+    posture for external-service credentials (see
+    rag/tools/retrieval_tool.py's tenancy guard for the same philosophy
+    applied to a different kind of missing required value). Only checks
+    keys for the providers actually selected, so e.g. running Sarvam-only
+    doesn't demand a Deepgram key that will never be used."""
+    checks = []
+    if STT_PROVIDER == "sarvam" or TTS_PROVIDER == "sarvam":
+        checks.append(("SARVAM_API_KEY", SARVAM_API_KEY))
+    if STT_PROVIDER == "deepgram":
+        checks.append(("DEEPGRAM_API_KEY", DEEPGRAM_API_KEY))
+    if TTS_PROVIDER == "cartesia":
+        checks.append(("CARTESIA_API_KEY", CARTESIA_API_KEY))
+    missing = [name for name, val in checks if not val]
+    if missing:
+        raise RuntimeError(f"voice pipeline: missing required env vars: {', '.join(missing)}")
+
+
+def require_stt_key() -> None:
+    """Narrower than require_keys() — for STT-only callers (dictation:
+    routes/voice_routes.py's /dictate endpoint), which have no TTS leg at
+    all. Using the full require_keys() there would wrongly demand a TTS
+    provider key (e.g. CARTESIA_API_KEY) that dictation will never touch,
+    if STT_PROVIDER and TTS_PROVIDER ever point at different providers."""
+    if STT_PROVIDER == "sarvam" and not SARVAM_API_KEY:
+        raise RuntimeError("voice pipeline: missing required env var: SARVAM_API_KEY")
+    if STT_PROVIDER == "deepgram" and not DEEPGRAM_API_KEY:
+        raise RuntimeError("voice pipeline: missing required env var: DEEPGRAM_API_KEY")
