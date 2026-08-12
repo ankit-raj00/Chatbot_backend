@@ -54,6 +54,33 @@ SARVAM_TTS_SPEAKER = os.getenv("SARVAM_TTS_SPEAKER", "shubh")
 SARVAM_TTS_LANGUAGE_CODE = os.getenv("SARVAM_TTS_LANGUAGE_CODE", "hi-IN")
 SARVAM_TTS_SAMPLE_RATE = int(os.getenv("SARVAM_TTS_SAMPLE_RATE", "24000"))
 
+# ── Audio wire format (browser-bound) ────────────────────────────────────
+# The single format every TTS provider is normalized to before the audio
+# goes out over the WebSocket, and the format voiceClient.js decodes.
+#
+# This is 8-bit mu-law, NOT the pcm_f32le this pipeline originally used, and
+# the reason is bandwidth — measured, not guessed:
+#
+#   pcm_f32le @24kHz = 768 kbps   <- what we used to send
+#   pcm_s16le @24kHz = 384 kbps
+#   mulaw     @24kHz = 192 kbps   <- what we send now
+#
+# Measured transfer throughput to a real browser over the public HTTPS
+# endpoint was ~414 kbps, so the old float32 stream needed roughly TWICE
+# the bandwidth the link could actually carry. Audio therefore arrived at
+# ~0.25x realtime and the player starved continuously — confirmed by
+# instrumenting real turns (11.36s of speech taking 44.56s to deliver)
+# while TTS itself measured 1.4-2.1x realtime and the agent produced its
+# whole response in one 3.5s burst. Neither stage was slow; the pipe was.
+#
+# mu-law was chosen over mp3/opus (which Sarvam also offers, and which are
+# far smaller still) because it is a stateless, sample-by-sample encoding:
+# every chunk decodes independently with no frame boundaries, no container,
+# no decoder library, and no change to the chunk-by-chunk streaming model.
+# A compressed codec would cut bandwidth much further but would need
+# MediaSource/decodeAudioData framing work to stay gapless.
+VOICE_WIRE_CODEC = "mulaw"
+
 SARVAM_STT_MODEL = os.getenv("SARVAM_STT_MODEL", "saaras:v3")
 # codemix = "English words in English script and Indic words in native
 # script" — confirmed live via a real TTS->STT round trip on a Hinglish

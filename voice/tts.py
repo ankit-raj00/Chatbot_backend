@@ -27,9 +27,13 @@ from voice import config
 
 logger = structlog.get_logger(__name__)
 
+# pcm_mulaw, not pcm_f32le: one wire format shared with the Sarvam client so
+# the browser only ever decodes one thing, and 4x fewer bytes than float32 —
+# see voice/config.py's VOICE_WIRE_CODEC for the bandwidth measurements that
+# forced this change.
 OUTPUT_FORMAT = {
     "container": "raw",
-    "encoding": "pcm_f32le",
+    "encoding": "pcm_mulaw",
     "sample_rate": config.CARTESIA_SAMPLE_RATE,
 }
 
