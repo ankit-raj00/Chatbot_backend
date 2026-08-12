@@ -35,6 +35,11 @@ jobs:
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          SARVAM_API_KEY: ${{ secrets.SARVAM_API_KEY }}
+          DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+          CARTESIA_API_KEY: ${{ secrets.CARTESIA_API_KEY }}
+          VOICE_STT_PROVIDER: ${{ vars.VOICE_STT_PROVIDER }}
+          VOICE_TTS_PROVIDER: ${{ vars.VOICE_TTS_PROVIDER }}
         run: |
           set -e
           SSH_OPTS="-i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
@@ -54,10 +59,28 @@ jobs:
             -e "ssh $SSH_OPTS" \
             ./ "$DEPLOY_USER@$DEPLOY_HOST:~/$REMOTE_DIR/"
 
+          # App secrets/vars that are managed in GitHub (not carried forward
+          # from the box's own .env) get layered on after the copy-forward
+          # below, via deploy/merge_env.sh. Add new KEY=VALUE lines here as
+          # more such secrets are introduced, rather than hand-editing the box.
+          VALUES_FILE="$(mktemp)"
+          {
+            echo "SARVAM_API_KEY=$SARVAM_API_KEY"
+            echo "DEEPGRAM_API_KEY=$DEEPGRAM_API_KEY"
+            echo "CARTESIA_API_KEY=$CARTESIA_API_KEY"
+            echo "VOICE_STT_PROVIDER=$VOICE_STT_PROVIDER"
+            echo "VOICE_TTS_PROVIDER=$VOICE_TTS_PROVIDER"
+          } > "$VALUES_FILE"
+          scp $SSH_OPTS "$VALUES_FILE" "$DEPLOY_USER@$DEPLOY_HOST:~/$REMOTE_DIR/voice.env.new"
+          rm -f "$VALUES_FILE"
+
           ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" "
             set -e
             LATEST_ENV=\$(ls -dt ~/chatbot-backend-v* ~/chatbot-backend-ci-* 2>/dev/null | grep -v '$REMOTE_DIR\$' | head -1)/.env
             cp \"\$LATEST_ENV\" ~/$REMOTE_DIR/.env
+
+            bash ~/$REMOTE_DIR/deploy/merge_env.sh ~/$REMOTE_DIR/.env ~/$REMOTE_DIR/voice.env.new
+            rm -f ~/$REMOTE_DIR/voice.env.new
 
             cd ~/$REMOTE_DIR
             docker build -t chatbot-backend:$VERSION .
