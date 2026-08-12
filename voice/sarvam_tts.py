@@ -27,7 +27,6 @@ docstring explains, and the same reason voice/speaker.py's TurnSpeaker
 exists: a provider-side idle/completion boundary must never be allowed to
 end an agent TURN, only a SPEECH BURST.
 """
-import array
 import base64
 import json
 import uuid
@@ -41,17 +40,14 @@ from voice import config
 logger = structlog.get_logger(__name__)
 
 
-def _pcm16_to_pcm_f32le(pcm16: bytes) -> bytes:
-    """Sarvam's linear16 output is int16 PCM; the rest of this pipeline
-    (voice/speaker.py, the frontend's voiceClient.js Float32Array parsing)
-    is built around pcm_f32le, matching Cartesia's native output format.
-    Converting here — rather than teaching the frontend a second wire
-    format — keeps synthesize_stream_sarvam a true drop-in for
-    voice.tts.synthesize_stream regardless of which provider is behind it."""
-    samples = array.array("h")  # signed short = int16
-    samples.frombytes(pcm16)
-    floats = array.array("f", (s / 32768.0 for s in samples))
-    return floats.tobytes()
+"""NOTE: this module used to convert Sarvam's int16 output up to pcm_f32le
+here, purely so the frontend could do `new Float32Array(buffer)` directly.
+That convenience DOUBLED the bytes on the wire (768 kbps vs 384) on a link
+measured at only ~414 kbps, and was a direct cause of the audio arriving at
+a quarter of realtime. Sarvam is now asked for mu-law directly
+(config.VOICE_WIRE_CODEC), which is 192 kbps, and its bytes are forwarded
+untouched — no conversion step at all. See voice/config.py for the
+measurements behind that choice."""
 
 
 async def synthesize_stream(
@@ -75,7 +71,7 @@ async def synthesize_stream(
                 "language_code": config.SARVAM_TTS_LANGUAGE_CODE,
                 "speaker": speaker,
                 "speech_sample_rate": config.SARVAM_TTS_SAMPLE_RATE,
-                "output_audio_codec": "linear16",
+                "output_audio_codec": config.VOICE_WIRE_CODEC,
                 # Normalizes English words/numbers mixed into Hindi text —
                 # on by default here since this pipeline's narration is
                 # itself often code-mixed (model responding in Hindi with
@@ -135,9 +131,12 @@ async def synthesize_stream(
                 msg = json.loads(raw)
                 mtype = msg.get("type")
                 if mtype == "audio":
-                    pcm16 = base64.b64decode(msg["data"]["audio"])
-                    if pcm16:
-                        yield _pcm16_to_pcm_f32le(pcm16)
+                    # Forwarded verbatim — Sarvam is already producing the
+                    # exact codec the browser decodes, so there is nothing
+                    # to convert (and nothing to inflate).
+                    audio = base64.b64decode(msg["data"]["audio"])
+                    if audio:
+                        yield audio
                 elif mtype == "error":
                     raise RuntimeError(f"Sarvam TTS error: {msg}")
                 elif mtype == "event":
