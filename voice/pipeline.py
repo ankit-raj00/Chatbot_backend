@@ -491,6 +491,7 @@ class VoicePipeline:
                 timeline.append({"type": "text", "content": text})
 
         files_before, outputs_dir = await self._snapshot_outputs()
+        files_created: list = []
 
         # Tool events have to reach the caller WHILE audio is streaming, but
         # audio is produced by a separate task (TurnSpeaker). Both are funneled
@@ -499,7 +500,7 @@ class VoicePipeline:
         _AUDIO_DONE = object()
 
         async def _text_stream():
-            nonlocal response_text, stop_reason
+            nonlocal response_text, stop_reason, files_created
             async for ev in self._run_agent_streaming(final_transcript):
                 etype = ev.get("type")
                 if etype == "text":
@@ -545,6 +546,18 @@ class VoicePipeline:
                 elif etype == "stopped":
                     stop_reason = ev.get("reason")
                     merged.put_nowait({"type": "stopped", "reason": stop_reason})
+
+            # Agent + tool execution is fully done here, which can be well
+            # before the trailing audio finishes — TTS lags behind text by
+            # design (voice/speaker.py's burst model), so a response with a
+            # few sentences after the file-creating tool call could leave
+            # the UI sitting on an already-finished file for as long as
+            # those sentences take to be spoken. Detect and emit it now
+            # instead of waiting for the _AUDIO_DONE sentinel below.
+            files_created = await self._detect_created_files(files_before, outputs_dir)
+            if files_created:
+                timeline.append({"type": "files_created", "files": files_created})
+                merged.put_nowait({"type": "files_created", "files": files_created})
 
         # One Cartesia session per speech BURST, many bursts per turn — see
         # voice/speaker.py for why this must not be a single
@@ -604,13 +617,12 @@ class VoicePipeline:
                                          self._turn_input_tokens, self._turn_output_tokens,
                                          partial_cost, timeline=timeline,
                                          tool_steps=tool_steps, skills=skills,
+                                         files_created=files_created,
                                          stop_reason=stop_reason or "user_stop"),
                       name="voice_partial_persist")
 
-        files_created = await self._detect_created_files(files_before, outputs_dir)
-        if files_created:
-            timeline.append({"type": "files_created", "files": files_created})
-
+        # files_created was already detected and emitted live above, right
+        # as the agent's own work finished (not gated behind audio).
         cost_usd = self._turn_input_tokens * self._input_price + self._turn_output_tokens * self._output_price
         await self._persist_turn(final_transcript, response_text,
                                  self._turn_input_tokens, self._turn_output_tokens, cost_usd,
