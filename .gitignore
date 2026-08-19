@@ -9,3 +9,18 @@ qdrant_data/
 temp/
 temp_images_*/
 debug_parsed_md/
+
+# One-off debug/scratch scripts kept locally, not part of the project
+debug_*.py
+check_*.py
+update_*.py
+run_e2e*.py
+reset_qdrant.py
+cleanup_legacy.py
+# Stray root-level test scripts — the real suite lives in tests/ (see pytest.ini)
+/test_*.py
+# Accidental files from redirected pip output (e.g. `pip install "fpdf2>2.7.0"`)
+/[0-9].[0-9].[0-9]
+
+# Personal interview-prep notes — kept locally, not published
+docs/interview-prep/

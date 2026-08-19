@@ -1,0 +1,41 @@
+<title>Parser Dashboard — Sign in</title>
+<style>
+  :root { --bg: #0b0d12; --surface: #12151c; --border: #262b36; --text: #e6e9ef; --text-dim: #9199a8; --accent: #5b8cff; --red: #f87171; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  }
+  form {
+    width: 320px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 28px;
+  }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  p.sub { color: var(--text-dim); font-size: 12px; margin: 0 0 20px; }
+  label { display: block; font-size: 12px; color: var(--text-dim); margin: 14px 0 6px; }
+  input {
+    width: 100%; padding: 9px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: #0e1117; color: var(--text); font-size: 14px;
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+  button {
+    margin-top: 20px; width: 100%; padding: 10px; border-radius: 8px; border: none;
+    background: var(--accent); color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  button:hover { opacity: .92; }
+  .err {
+    background: rgba(248,113,113,.1); border: 1px solid rgba(248,113,113,.3); color: var(--red);
+    border-radius: 8px; padding: 8px 10px; font-size: 12.5px; margin-bottom: 4px;
+  }
+</style>
+<form method="post" action="/dashboard/login">
+  <h1>Parser Dashboard</h1>
+  <p class="sub">Custom PDF-parser run history</p>
+  {{ERROR}}
+  <label for="username">Username</label>
+  <input id="username" name="username" autocomplete="username" autofocus>
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password">
+  <button type="submit">Sign in</button>
+</form>
