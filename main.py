@@ -251,7 +251,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],   # Explicit, not ["*"]
+    # Explicit, not ["*"]. PATCH is load-bearing: message feedback
+    # (thumbs up/down) and conversation rename are both PATCH, and leaving it
+    # out made the browser's preflight fail with a 400 while every server-side
+    # test still passed — CORS is enforced by the browser, so requests/pytest
+    # never exercise it. Add the verb here when adding a route that uses it.
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
 )
 
