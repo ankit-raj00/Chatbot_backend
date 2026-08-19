@@ -87,11 +87,17 @@ jobs:
             # crept to 88% full and a deploy died partway through pip install
             # with ENOSPC (run 32260412602) — the build needs several GB of
             # scratch space. Keep the live container and the single most recent
-            # rollback target, drop everything older. 'docker image prune -a'
-            # cannot remove an image backing a running OR a stopped container,
-            # so both of those survive by construction rather than by luck.
+            # rollback target. THIS deploy's rollback target does not exist yet
+            # — it is created a few lines below by renaming the live container
+            # — so every chatbot-backend-prev-* present right now belongs to an
+            # older deploy that already passed its own health check and is pure
+            # garbage. Removing all of them is safe, and on an 8GB box holding
+            # even one spare 1.3GB image is the difference between a build that
+            # fits and one that does not. 'docker image prune -a' cannot remove
+            # an image backing a running container, so the live one survives by
+            # construction rather than by getting a filter right.
             docker ps -a --filter 'name=chatbot-backend-prev-' --format '{{.Names}}' \
-              | sort -r | tail -n +2 | xargs -r docker rm || true
+              | xargs -r docker rm || true
             docker image prune -a -f || true
             docker builder prune -a -f || true
             # One source tree per deploy accumulates too (~7MB each). The
