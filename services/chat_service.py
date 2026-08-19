@@ -45,6 +45,12 @@ DEFAULT_MODEL = ModelConfig.DEFAULT_MODEL
 # it gets expensive, while giving legitimate long agentic turns real headroom.
 MAX_TURN_COST_USD = float(os.getenv("MAX_TURN_COST_USD", "5.00"))
 
+# Ceiling on retrieved-context bytes stored per message for the eval export.
+# This content is already present in the timeline as str(output), so keeping
+# a clean structured copy roughly doubles storage for a RAG turn — fine at
+# ~10KB/turn, worth bounding for a turn that searches the KB a dozen times.
+_MAX_RAG_CONTEXT_CHARS = 50_000
+
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from core.database import messages_collection, conversations_collection
@@ -146,7 +152,8 @@ class ChatService:
         cid: str, user_id: str, content: str, timeline: list,
         input_tokens: int = 0, output_tokens: int = 0, cost_usd: float = 0.0,
         stop_reason: str = "user_stop",
-    ) -> None:
+        rag_contexts: list | None = None,
+    ) -> str | None:
         """Persist a partial assistant message when a turn was stopped/cancelled,
         so the streamed-so-far content isn't lost on reload. A stopped turn
         (whether user-initiated or the credit grace-buffer cutoff) still
@@ -154,14 +161,20 @@ class ChatService:
         actually accrued — not just $0, or the grace buffer never actually
         gets billed. `stop_reason` distinguishes an explicit user Stop click
         from a server-side cost cutoff, so the UI can say something honest
-        instead of implying a connection problem."""
+        instead of implying a connection problem.
+
+        Returns the new message's id (None if the insert failed) so the caller
+        can hand it to the client on the 'stopped' event — a stopped turn is
+        still a rateable, retryable message."""
+        message_id = None
         try:
-            await messages_collection.insert_one({
+            insert_result = await messages_collection.insert_one({
                 "conversation_id": cid,
                 "user_id":         user_id,
                 "role":            "model",
                 "content":         content,
                 "timeline":        timeline,
+                "rag_contexts":    rag_contexts or [],
                 "stopped":         True,
                 "stop_reason":     stop_reason,
                 "input_tokens":    input_tokens,
@@ -169,11 +182,49 @@ class ChatService:
                 "cost_usd":        round(cost_usd, 8),
                 "timestamp":       datetime.now(),
             })
+            message_id = str(insert_result.inserted_id)
             await HistoryService.invalidate(cid)
         except Exception as e:
             logger.warning(f"failed to persist stopped message: {e}")
         if cost_usd > 0:
             spawn(CreditService.record_and_deduct(user_id, cost_usd), name="credit_deduction_stopped")
+        return message_id
+
+    @staticmethod
+    async def _precheck_and_lock(user_id: str) -> str | None:
+        """Gate a new turn on credit + one-turn-per-user, acquiring the turn
+        lock on success.
+
+        Returns None when the turn may proceed, or a ready-to-yield SSE error
+        frame when it may not. It returns rather than yields because both
+        callers (stream, retry) are async generators — a helper can't yield on
+        their behalf.
+
+        IMPORTANT: on success this leaves the turn lock HELD. It is released in
+        _run_turn's finally block, which only runs if _run_turn was actually
+        spawned — so any caller path that returns early between here and the
+        spawn must release it explicitly, or the user is locked out of chatting
+        until the lock's TTL expires.
+        """
+        # Hard block BEFORE any conversation/message gets created — a blocked
+        # turn should leave no trace. Same SSE error channel used everywhere
+        # else, so the frontend's existing `data.error` handling picks this up
+        # unchanged; error_code lets it show a specific message instead of the
+        # generic fallback (see ChatPage.jsx).
+        if not await CreditService.has_credit(user_id):
+            cap = await CreditService.get_cap(user_id)
+            block_message = f"You've used your ${cap:.0f} free credit. Upgrade to keep chatting."
+            return f"data: {json.dumps({'error': block_message, 'error_code': 'credit_limit_reached'})}\n\n"
+
+        # Closes the race where several concurrent turns (different
+        # conversations, or a direct API call bypassing the frontend's
+        # single-composer UX) would each pass has_credit() independently
+        # since none of them have deducted anything yet — only the
+        # (N+1)th of N simultaneous turns would actually see the cap.
+        if not await CreditService.acquire_turn_lock(user_id):
+            return f"data: {json.dumps({'error': 'You already have a generation in progress. Please wait for it to finish.', 'error_code': 'turn_in_progress'})}\n\n"
+
+        return None
 
     @classmethod
     async def stream(
@@ -204,29 +255,9 @@ class ChatService:
         mcp_server_ids      = mcp_server_ids or []
         files_content_parts = files_content_parts or []
 
-        # ── Credit pre-check ────────────────────────────────────────────
-        # Hard block BEFORE any conversation/message gets created — a blocked
-        # turn should leave no trace. Same SSE error channel used everywhere
-        # else in this method (see the Step 1-2 except block below), so the
-        # frontend's existing `data.error` handling picks this up unchanged;
-        # error_code lets it show a specific message instead of the generic
-        # fallback (see ChatPage.jsx).
-        if not await CreditService.has_credit(user_id):
-            cap = await CreditService.get_cap(user_id)
-            block_message = f"You've used your ${cap:.0f} free credit. Upgrade to keep chatting."
-            yield f"data: {json.dumps({'error': block_message, 'error_code': 'credit_limit_reached'})}\n\n"
-            return
-
-        # ── Turn concurrency lock ────────────────────────────────────────
-        # Closes the race where several concurrent turns (different
-        # conversations, or a direct API call bypassing the frontend's
-        # single-composer UX) would each pass has_credit() independently
-        # since none of them have deducted anything yet — only the
-        # (N+1)th of N simultaneous turns would actually see the cap. One
-        # in-flight turn per user; released in _run_turn's finally block
-        # on every exit path (success, stop, error).
-        if not await CreditService.acquire_turn_lock(user_id):
-            yield f"data: {json.dumps({'error': 'You already have a generation in progress. Please wait for it to finish.', 'error_code': 'turn_in_progress'})}\n\n"
+        blocked = await cls._precheck_and_lock(user_id)
+        if blocked:
+            yield blocked
             return
 
         # Steps 1-2 aren't inside _run_turn's try/except (that only guards
@@ -284,6 +315,120 @@ class ChatService:
         if not turn_id:
             yield f"data: {json.dumps({'error': 'No active generation to resume.'})}\n\n"
             return
+        async for chunk in cls._view_turn(turn_id):
+            yield chunk
+
+    @classmethod
+    async def retry(
+        cls,
+        user_id: str,
+        conversation_id: str,
+        message_id: str,
+        mcp_server_ids: list[str] | None = None,
+        model: str | None = None,
+        enabled_tools: list[str] | None = None,
+        selected_files: list[str] | None = None,
+    ):
+        """Regenerate an assistant response in place: tombstone the existing
+        one and run a fresh turn against the SAME preceding user message.
+
+        Restricted to the conversation's LAST message, for two independent
+        reasons. (1) get_history returns the most recent N messages and only
+        excludes exclude_msg_id — retrying mid-conversation would hand the
+        agent every *later* turn while asking it to answer an *earlier*
+        prompt. (2) The frontend streams into the last message in its list;
+        targeting an earlier one would need a rewrite of that (deliberately
+        identity-stable, perf-critical) update path.
+
+        The old response is marked superseded rather than deleted, so a
+        regeneration that fails can't destroy it — and so the discarded/kept
+        pair survives as preference data for the feedback export.
+        """
+        blocked = await cls._precheck_and_lock(user_id)
+        if blocked:
+            yield blocked
+            return
+
+        # Past this point the turn lock is HELD — every early return below
+        # must release it (see _precheck_and_lock).
+        try:
+            target = await messages_collection.find_one({
+                "_id": ObjectId(message_id),
+                "conversation_id": conversation_id,
+                "user_id": user_id,
+                "role": "model",
+                "superseded": {"$ne": True},
+            })
+            if not target:
+                await CreditService.release_turn_lock(user_id)
+                yield f"data: {json.dumps({'error': 'That response no longer exists.', 'error_code': 'message_not_found'})}\n\n"
+                return
+
+            newer = await messages_collection.find_one(
+                {
+                    "conversation_id": conversation_id,
+                    "user_id": user_id,
+                    "superseded": {"$ne": True},
+                    "timestamp": {"$gt": target["timestamp"]},
+                },
+                sort=[("timestamp", -1)],
+            )
+            if newer:
+                await CreditService.release_turn_lock(user_id)
+                yield f"data: {json.dumps({'error': 'Only the most recent response can be retried.', 'error_code': 'retry_not_last'})}\n\n"
+                return
+
+            preceding = await messages_collection.find_one(
+                {
+                    "conversation_id": conversation_id,
+                    "user_id": user_id,
+                    "role": "user",
+                    "timestamp": {"$lt": target["timestamp"]},
+                },
+                sort=[("timestamp", -1)],
+            )
+            if not preceding:
+                await CreditService.release_turn_lock(user_id)
+                yield f"data: {json.dumps({'error': 'Could not find the message to retry.', 'error_code': 'prompt_not_found'})}\n\n"
+                return
+
+            # Tombstone BEFORE regenerating so the discarded answer can't leak
+            # into the new turn's own context; invalidate so get_history
+            # actually re-reads (it consults the Redis cache before applying
+            # any query filter, so a stale cache would still contain it).
+            await messages_collection.update_one(
+                {"_id": target["_id"]},
+                {"$set": {"superseded": True, "superseded_at": datetime.now()}},
+            )
+            await HistoryService.invalidate(conversation_id)
+        except Exception as e:
+            logger.error(f"ChatService.retry setup error: {e}", exc_info=True)
+            await CreditService.release_turn_lock(user_id)
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            return
+
+        turn_id = str(uuid.uuid4())
+        task = spawn(
+            cls._run_turn(
+                turn_id, user_id, preceding.get("content", ""), conversation_id,
+                mcp_server_ids or [],
+                # Default to whatever model produced the response being
+                # replaced, so a plain "try again" stays a like-for-like
+                # comparison, while still letting the caller switch models.
+                model or target.get("model") or DEFAULT_MODEL,
+                enabled_tools or [], selected_files,
+                # Not reconstructed: the multimodal content parts of the
+                # original upload. Attachment metadata carries over (so the
+                # sandbox-path note is rebuilt), but a retried image turn
+                # regenerates from text context only.
+                [],
+                preceding.get("attachments"),
+                preceding["_id"],
+            ),
+            name="agent_turn_retry",
+        )
+        turn_manager.start(turn_id, conversation_id, user_id, task)
+
         async for chunk in cls._view_turn(turn_id):
             yield chunk
 
@@ -458,6 +603,15 @@ class ChatService:
             # shape of full_response/tool_steps/skills/artifacts above.
             timeline: list[dict] = []
 
+            # Retrieved knowledge-base chunks, captured structurally as the
+            # search tool returns them (see the on_tool_end handler). The
+            # timeline already holds this content, but only as str(output) —
+            # a Python repr that would have to be literal_eval'd back apart.
+            # Ragas wants retrieved_contexts as a clean list[str], and the
+            # feedback export is the whole reason we keep it, so capture it
+            # properly here rather than parsing a repr later.
+            rag_contexts: list[str] = []
+
             def _tl_add_text(text: str) -> None:
                 if timeline and timeline[-1].get("type") == "text":
                     timeline[-1]["content"] += text
@@ -599,6 +753,19 @@ class ChatService:
                     output    = event.get("data", {}).get("output", "")
                     _tl_complete_tool(tool_name, str(output), tool_run_id)
                     turn_manager.publish(turn_id, {'tool_output': {'name': tool_name, 'result': str(output)}})
+
+                    # Structured capture of retrieved context for the eval
+                    # export (see FeedbackExportService). search_knowledge_base
+                    # returns list[dict] with a "content" key already wrapped by
+                    # wrap_untrusted — exactly the strings Ragas scores against.
+                    # Capped because this duplicates content the timeline also
+                    # stores, and one pathological turn shouldn't bloat the doc.
+                    if tool_name == "search_knowledge_base" and isinstance(output, list):
+                        if sum(len(c) for c in rag_contexts) < _MAX_RAG_CONTEXT_CHARS:
+                            rag_contexts.extend(
+                                item["content"] for item in output
+                                if isinstance(item, dict) and isinstance(item.get("content"), str)
+                            )
 
                     # NOTE: a regex-based "artifact" interception used to live here for
                     # write_to_file/create_pdf/create_docx/create_pptx/run_python. Removed:
@@ -793,7 +960,7 @@ class ChatService:
                 total_input_tokens  * INPUT_PRICE_PER_TOKEN +
                 total_output_tokens * OUTPUT_PRICE_PER_TOKEN
             )
-            await messages_collection.insert_one({
+            insert_result = await messages_collection.insert_one({
                 "conversation_id": conversation_id,
                 "user_id":         user_id,
                 "role":            "model",
@@ -803,6 +970,7 @@ class ChatService:
                 "artifacts":       artifacts,
                 "files_created":   created_files,
                 "timeline":        timeline,
+                "rag_contexts":    rag_contexts,
                 "model":           model,
                 "input_tokens":    total_input_tokens,
                 "output_tokens":   total_output_tokens,
@@ -846,7 +1014,13 @@ class ChatService:
             )
 
             await HistoryService.invalidate(conversation_id)
-            turn_manager.publish(turn_id, {'done': True, 'conversation_id': conversation_id, 'agent': routed_agent})
+            # message_id rides along on 'done' so the client can act on the
+            # message it just watched stream (rate it, retry it) without
+            # waiting for a page reload to learn its real _id.
+            turn_manager.publish(turn_id, {
+                'done': True, 'conversation_id': conversation_id, 'agent': routed_agent,
+                'message_id': str(insert_result.inserted_id),
+            })
             turn_manager.finish(turn_id, "done")
 
         except asyncio.CancelledError:
@@ -869,9 +1043,15 @@ class ChatService:
             out_price = locals().get("OUTPUT_PRICE_PER_TOKEN", 0.0) or 0.0
             partial_cost = in_tok * in_price + out_tok * out_price
             reason = locals().get("stop_reason") or "user_stop"
+            stopped_msg_id = None
             if cid and (partial or tl or in_tok or out_tok):
-                await cls._persist_stopped_message(cid, user_id, partial, tl, in_tok, out_tok, partial_cost, stop_reason=reason)
-            turn_manager.publish(turn_id, {'stopped': True, 'stop_reason': reason})
+                stopped_msg_id = await cls._persist_stopped_message(
+                    cid, user_id, partial, tl, in_tok, out_tok, partial_cost,
+                    stop_reason=reason, rag_contexts=locals().get("rag_contexts") or [],
+                )
+            turn_manager.publish(turn_id, {
+                'stopped': True, 'stop_reason': reason, 'message_id': stopped_msg_id,
+            })
             turn_manager.finish(turn_id, "stopped")
 
         except Exception as e:

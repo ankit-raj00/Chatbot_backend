@@ -81,6 +81,42 @@ async def chat_stream_multimodal(
     )
 
 
+class RetryRequest(BaseModel):
+    # All optional: an unspecified model falls back to whichever produced the
+    # response being replaced (see ChatService.retry), the rest to the current
+    # composer selection.
+    mcp_server_ids: List[str] = []
+    model: str | None = None
+    enabled_tools: List[str] = []
+    selected_files: List[str] = []
+
+
+@router.post("/{conversation_id}/messages/{message_id}/retry")
+@limiter.limit(f"{os.getenv('CHAT_RATE_LIMIT', '20')}/minute")
+async def retry_message(
+    request: Request,
+    conversation_id: str,
+    message_id: str,
+    retry_request: RetryRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Regenerate the conversation's most recent assistant response, replacing
+    it in place. Same SSE wire format as /stream."""
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        chat_controller.retry_stream(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            user_id=str(current_user["_id"]),
+            mcp_server_ids=retry_request.mcp_server_ids,
+            model=retry_request.model,
+            enabled_tools=retry_request.enabled_tools,
+            selected_files=retry_request.selected_files,
+        ),
+        media_type="text/event-stream"
+    )
+
+
 @router.get("/{conversation_id}/active-turn")
 @limiter.limit("60/minute")
 async def get_active_turn(

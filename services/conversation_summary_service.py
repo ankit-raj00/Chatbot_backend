@@ -90,9 +90,20 @@ class ConversationSummaryService:
         try:
             from bson import ObjectId
 
-            total = await messages_collection.count_documents({
+            # NOTE: this filter and the `find` below MUST stay identical.
+            # `covered` (summary_covers_count) is an offset derived from this
+            # count and fed to .skip() there, so filtering one query but not
+            # the other silently shifts the window and summarizes the wrong
+            # messages. Excluding superseded (Retry-replaced) messages matters
+            # here specifically because this service folds message CONTENT
+            # into a running summary that PromptBuilder injects into every
+            # system prompt — an unfiltered read would leak a discarded
+            # response back into context permanently, defeating the tombstone.
+            _live_messages = {
                 "conversation_id": conversation_id, "user_id": user_id,
-            })
+                "superseded": {"$ne": True},
+            }
+            total = await messages_collection.count_documents(_live_messages)
             # Nothing has fallen out of the retained window yet.
             if total <= MAX_HISTORY_MESSAGES:
                 return
@@ -110,7 +121,7 @@ class ConversationSummaryService:
                 return  # Not enough new material yet — skip, save the LLM call.
 
             cursor = (messages_collection
-                      .find({"conversation_id": conversation_id, "user_id": user_id})
+                      .find(_live_messages)          # same filter as the count above — see note
                       .sort("timestamp", 1)
                       .skip(covered)
                       .limit(newly_aged_out))

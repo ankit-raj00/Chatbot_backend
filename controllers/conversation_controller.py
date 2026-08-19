@@ -68,7 +68,12 @@ class ConversationController:
             
             messages_cursor = messages_collection.find({
                 "conversation_id": conversation_id,
-                "user_id": user_id
+                "user_id": user_id,
+                # Responses replaced via Retry are tombstoned rather than
+                # deleted (see ChatService.retry) so a failed regeneration
+                # can't destroy the original — but the user should only ever
+                # see the surviving one.
+                "superseded": {"$ne": True}
             }).sort("timestamp", 1)
             messages_list = await messages_cursor.to_list(length=1000)
             
@@ -88,6 +93,92 @@ class ConversationController:
                 detail=str(e)
             )
     
+    @staticmethod
+    async def rename_conversation(conversation_id: str, user_id: str, title: str):
+        """Rename a conversation. Scoped by user_id in the update filter itself
+        so another user's conversation can never be touched, matching how
+        submit_message_feedback scopes its update."""
+        try:
+            clean = (title or "").strip()
+            if not clean:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Title cannot be empty"
+                )
+
+            result = await conversations_collection.update_one(
+                {"_id": ObjectId(conversation_id), "user_id": user_id},
+                {"$set": {"title": clean, "updated_at": datetime.now()}}
+            )
+            if result.matched_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Conversation not found"
+                )
+            return {"_id": conversation_id, "title": clean}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(e)
+            )
+
+    @staticmethod
+    async def submit_message_feedback(
+        conversation_id: str, message_id: str, user_id: str,
+        rating: str | None, reason: str | None,
+    ):
+        """Set (or clear, when rating is None) the thumbs up/down on one
+        assistant message.
+
+        Feedback lives as flat fields on the message document rather than in
+        its own collection — it's strictly 1:1 with a message and is always
+        read alongside one, matching how cost_usd/stop_reason are already
+        stored. Clearing writes an explicit None instead of $unset so the
+        export query below can filter on rating values directly.
+        """
+        try:
+            conv = await conversations_collection.find_one({
+                "_id": ObjectId(conversation_id),
+                "user_id": user_id
+            })
+            if not conv:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Conversation not found"
+                )
+
+            # role: "model" is how assistant messages are stored (see
+            # ChatService Step 8) — scoping the update to it means a user
+            # can't rate their own prompt.
+            result = await messages_collection.update_one(
+                {
+                    "_id": ObjectId(message_id),
+                    "conversation_id": conversation_id,
+                    "user_id": user_id,
+                    "role": "model",
+                },
+                {"$set": {
+                    "rating": rating,
+                    "rating_reason": reason,
+                    "rated_at": datetime.now(),
+                }}
+            )
+            if result.matched_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Message not found"
+                )
+            return {"rating": rating, "reason": reason}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(e)
+            )
+
     @staticmethod
     async def delete_conversation(conversation_id: str, user_id: str):
         """Delete a conversation and all its messages"""

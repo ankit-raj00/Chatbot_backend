@@ -96,6 +96,34 @@ class ChatController:
         async for chunk in ChatService.resume(conversation_id, user_id):
             yield chunk
 
+    async def retry_stream(
+        self,
+        conversation_id: str,
+        message_id: str,
+        user_id: str,
+        mcp_server_ids: list[str] = None,
+        model: str = None,
+        enabled_tools: list[str] = None,
+        selected_files: list[str] = None,
+    ):
+        """Regenerate an assistant response in place. `model=None` is passed
+        through deliberately — ChatService.retry falls back to whichever model
+        produced the response being replaced, so a plain retry stays a
+        like-for-like comparison."""
+        if model and not ModelConfig.is_valid_model(model):
+            model = None
+
+        async for chunk in ChatService.retry(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            message_id=message_id,
+            mcp_server_ids=mcp_server_ids,
+            model=model,
+            enabled_tools=enabled_tools,
+            selected_files=selected_files,
+        ):
+            yield chunk
+
     async def check_active_turn(self, conversation_id: str, user_id: str) -> dict:
         """Cheap, non-streaming check for whether this conversation has a
         turn in progress right now — the frontend calls this on page

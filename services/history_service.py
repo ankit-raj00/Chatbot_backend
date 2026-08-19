@@ -85,6 +85,14 @@ class HistoryService:
         query = {
             "conversation_id": conversation_id,
             "user_id": user_id,
+            # A response replaced via Retry is tombstoned, not deleted (see
+            # ChatService.retry) — it must never re-enter the agent's context,
+            # or the model would see both the discarded answer and its
+            # replacement to the same prompt. Cheap: the compound index
+            # already narrowed this to one conversation's messages, so this is
+            # just a post-filter over a few dozen docs. `$ne: True` matches
+            # documents that lack the field at all, so no backfill is needed.
+            "superseded": {"$ne": True},
         }
         if exclude_msg_id is not None:
             query["_id"] = {"$ne": exclude_msg_id}

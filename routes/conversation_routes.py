@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 from controllers.conversation_controller import ConversationController
-from models.conversation import ConversationCreate
+from models.conversation import ConversationCreate, MessageFeedback, ConversationRename
 from core.middleware import get_current_user
 
 router = APIRouter(prefix="/conversations", tags=["Conversations"])
@@ -30,6 +30,35 @@ async def get_messages(
     return await ConversationController.get_conversation_messages(
         conversation_id,
         str(current_user["_id"])
+    )
+
+@router.patch("/{conversation_id}")
+async def rename_conversation(
+    conversation_id: str,
+    payload: ConversationRename,
+    current_user: dict = Depends(get_current_user)
+):
+    """Rename a conversation"""
+    return await ConversationController.rename_conversation(
+        conversation_id,
+        str(current_user["_id"]),
+        payload.title
+    )
+
+@router.patch("/{conversation_id}/messages/{message_id}/feedback")
+async def submit_message_feedback(
+    conversation_id: str,
+    message_id: str,
+    feedback: MessageFeedback,
+    current_user: dict = Depends(get_current_user)
+):
+    """Thumbs up/down an assistant message (rating=null clears it)"""
+    return await ConversationController.submit_message_feedback(
+        conversation_id,
+        message_id,
+        str(current_user["_id"]),
+        feedback.rating,
+        feedback.reason
     )
 
 @router.delete("/{conversation_id}")
