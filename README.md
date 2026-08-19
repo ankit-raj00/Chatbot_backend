@@ -91,7 +91,8 @@ graph TD
     end
 
     subgraph external [External Services]
-        OMNI["OmniRoute\n(LLM gateway) → Gemini"]
+        OMNI["OmniRoute\n(LLM gateway)"]
+        GEMINI["Google Gemini"]
         LLAMA["LlamaParse\n(PDF parsing)"]
         TAVILY["Tavily\n(web search)"]
         MCP_SERVER["MCP Servers\n(Google Drive, Filesystem, ...)"]
@@ -105,11 +106,12 @@ graph TD
     CS --> HS --> REDIS
     CS --> CSS --> MONGO
     CS --> PB
-    AN <-->|"tool_calls / observations, looped"| ATN
+    AN -->|"tool_calls"| ATN
+    ATN -->|"observations, looped"| AN
     ATN --> HOOKS
     ATN -->|local mode| LOCAL
     ATN -->|remote mode| REMOTE
-    AN --> OMNI --> GEMINI["Google Gemini"]
+    AN --> OMNI --> GEMINI
     ATN -->|"knowledge_base_search"| QDRANT
     ATN -->|"web search"| TAVILY
     ATN -->|"MCP tool call"| MCP_SERVER
@@ -231,7 +233,7 @@ sequenceDiagram
     APP->>MONGO: register native tools (tools_collection)
     APP->>AGENT: warm up the compiled graph
     APP-->>U: yield (LIVE)
-    Note over U: Handles traffic; a background loop reaps idle sandbox workspaces
+    Note over U: Handles traffic — a background loop reaps idle sandbox workspaces
     U->>APP: shutdown
     APP->>APP: mcp_manager.disconnect_all()
     APP->>APP: close the checkpointer
@@ -287,13 +289,13 @@ background task (see §7) — it does **not** drive the agent inline with the HT
 ```mermaid
 sequenceDiagram
     participant FE as Frontend
-    participant CS as ChatService.stream()
+    participant CS as ChatService
     participant CRED as CreditService
     participant MONGO as MongoDB
     participant TM as turn_manager
     participant AN as agent_node
     participant ATN as agent_tool_node
-    participant OMNI as OmniRoute → Gemini
+    participant OMNI as OmniRoute/Gemini
 
     FE->>CS: POST /chat/stream
     CS->>CRED: has_credit(user)? acquire_turn_lock(user)?
