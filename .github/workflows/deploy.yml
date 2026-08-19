@@ -82,6 +82,24 @@ jobs:
             bash ~/$REMOTE_DIR/deploy/merge_env.sh ~/$REMOTE_DIR/.env ~/$REMOTE_DIR/voice.env.new
             rm -f ~/$REMOTE_DIR/voice.env.new
 
+            # Reclaim disk BEFORE building. Every deploy adds a ~1.3GB image
+            # plus build cache and nothing removed any of it, so this 8GB box
+            # crept to 88% full and a deploy died partway through pip install
+            # with ENOSPC (run 32260412602) — the build needs several GB of
+            # scratch space. Keep the live container and the single most recent
+            # rollback target, drop everything older. 'docker image prune -a'
+            # cannot remove an image backing a running OR a stopped container,
+            # so both of those survive by construction rather than by luck.
+            docker ps -a --filter 'name=chatbot-backend-prev-' --format '{{.Names}}' \
+              | sort -r | tail -n +2 | xargs -r docker rm || true
+            docker image prune -a -f || true
+            docker builder prune -a -f || true
+            # One source tree per deploy accumulates too (~7MB each). The
+            # directory for THIS deploy already exists (rsync ran above) and
+            # sorts newest, so keeping the newest 3 never removes it.
+            ls -dt ~/chatbot-backend-* 2>/dev/null | tail -n +4 | xargs -r rm -rf || true
+            df -h / | tail -1
+
             cd ~/$REMOTE_DIR
             docker build -t chatbot-backend:$VERSION .
 
