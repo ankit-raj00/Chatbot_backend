@@ -19,7 +19,7 @@ from core.limiter import limiter
 router = APIRouter(prefix="/api/parser", tags=["Parser"])
 logger = logging.getLogger(__name__)
 
-PARSER_SERVICE_URL = os.getenv("PARSER_SERVICE_URL", "http://52.207.56.41/parser")
+PARSER_SERVICE_URL = os.getenv("PARSER_SERVICE_URL", "")
 PARSER_SERVICE_KEY = os.getenv("PARSER_SERVICE_KEY", os.getenv("OMNIROUTE_API_KEY", ""))
 MAX_PDF_BYTES = 50 * 1024 * 1024  # 50 MB
 

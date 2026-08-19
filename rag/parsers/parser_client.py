@@ -13,7 +13,7 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-PARSER_SERVICE_URL = os.getenv("PARSER_SERVICE_URL", "http://52.207.56.41/parser")
+PARSER_SERVICE_URL = os.getenv("PARSER_SERVICE_URL", "")
 PARSER_SERVICE_KEY = os.getenv("PARSER_SERVICE_KEY", os.getenv("OMNIROUTE_API_KEY", ""))
 # The parser's region-VLM calls run strictly sequentially by design (parallel
 # calls trip the gateway's rate limits — see pdf-parser/parser.py's
