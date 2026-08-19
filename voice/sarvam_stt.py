@@ -122,14 +122,70 @@ async def stream_transcribe(
     encoding: str = "linear16",
     sample_rate: int = 16000,
 ) -> AsyncIterator[TranscriptEvent]:
+    """Multi-key fallback, same shape and same reasoning as
+    voice/sarvam_tts.py's synthesize_stream: the whole connect-and-transcribe
+    body (_stream_transcribe_once) is retried once per key in
+    config.SARVAM_KEY_POOL, but only while no real TranscriptEvent has been
+    yielded yet (`got_result`) — after that, a failure propagates normally
+    and the caller's existing error path handles it, since retrying after
+    partial transcript has already been consumed downstream would mean
+    re-transcribing audio whose text the caller already has. `audio_chunks`
+    is never restarted on retry, same rewind-impossibility reasoning as the
+    TTS side."""
     if sample_rate not in (8000, 16000):
         raise ValueError(f"Sarvam STT only supports 8000/16000 Hz, got {sample_rate}")
 
     url = (f"{config.SARVAM_STT_WS_URL}?language-code={config.SARVAM_STT_LANGUAGE_CODE}"
            f"&model={config.SARVAM_STT_MODEL}&mode={config.SARVAM_STT_MODE}"
            f"&sample_rate={sample_rate}")
-    headers = {"Api-Subscription-Key": config.SARVAM_API_KEY}
 
+    got_result = False
+    last_err: Exception | None = None
+    attempts = max(1, len(config.SARVAM_KEY_POOL))
+
+    for _attempt in range(attempts):
+        key = config.SARVAM_KEY_POOL.current()
+        headers = {"Api-Subscription-Key": key}
+        try:
+            async for event in _stream_transcribe_once(audio_chunks, url, headers, sample_rate):
+                got_result = True
+                yield event
+            return
+        except (websockets.exceptions.InvalidStatus, websockets.exceptions.InvalidStatusCode) as e:
+            if got_result:
+                raise
+            last_err = e
+            status = getattr(getattr(e, "response", None), "status_code", None) or getattr(e, "status_code", None)
+            if status in (401, 402, 403, 429):
+                config.SARVAM_KEY_POOL.mark_exhausted(key)
+                logger.warning("voice.sarvam_stt.key_rejected", status=status)
+                continue
+            raise
+        except RuntimeError as e:
+            # Raised below for a {"type":"error"} server message. Same
+            # deliberately-broad reasoning as the TTS side: Sarvam's "out of
+            # balance" payload shape isn't documented, so any server error
+            # reported before a real transcript has arrived is treated as
+            # "this key isn't usable right now" rather than guessed at.
+            if got_result:
+                raise
+            last_err = e
+            config.SARVAM_KEY_POOL.mark_exhausted(key)
+            logger.warning("voice.sarvam_stt.early_server_error", error=str(e))
+            continue
+
+    raise RuntimeError(f"Sarvam STT: all API keys exhausted or invalid ({last_err})")
+
+
+async def _stream_transcribe_once(
+    audio_chunks: AsyncIterator[bytes],
+    url: str,
+    headers: dict,
+    sample_rate: int,
+) -> AsyncIterator[TranscriptEvent]:
+    """One connection attempt with one key — the original single-key
+    implementation, unchanged, just extracted so stream_transcribe can wrap
+    it in a per-key retry loop without touching this logic at all."""
     accum_bytes = int(sample_rate * 2 * _ACCUM_MS / 1000)  # 2 bytes/sample (int16)
     queue: asyncio.Queue = asyncio.Queue()
     # A server-side error (bad auth, quota, malformed request) used to only

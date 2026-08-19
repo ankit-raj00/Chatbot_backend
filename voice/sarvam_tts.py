@@ -58,12 +58,75 @@ async def synthesize_stream(
     chunks to Sarvam and yields pcm_f32le audio bytes as they arrive.
     `voice_id` doubles as the Sarvam speaker name, kept as the same
     parameter name as the Cartesia version so pipeline.py/speaker.py don't
-    need to know which provider they're talking to."""
+    need to know which provider they're talking to.
+
+    Multi-key fallback: the whole connect-and-stream body below is tried
+    once per key in config.SARVAM_KEY_POOL, in order. A key is only rotated
+    past if the failure happens BEFORE any real audio has reached the
+    caller (tracked via `got_audio`) — retrying after partial audio was
+    already yielded would mean re-sending text that's already been spoken
+    for, risking duplicated or reordered audio. `text_chunks` itself is
+    never restarted on retry (async iterators can't be rewound) — it's the
+    exact same iterator object across attempts, so a retry just continues
+    consuming it from wherever the failed attempt left off; nothing before
+    that point gets replayed. Once audio starts flowing, a later failure is
+    left to propagate exactly as before this fallback existed — the
+    caller's existing per-burst catch (voice/speaker.py) already handles
+    that by moving on to the next burst, which will already be on whichever
+    key this loop last rotated to."""
     speaker = voice_id or config.SARVAM_TTS_SPEAKER
     url = (f"{config.SARVAM_TTS_WS_URL}?model={config.SARVAM_TTS_MODEL}"
            f"&send_completion_event=true")
-    headers = {"Api-Subscription-Key": config.SARVAM_API_KEY}
 
+    got_audio = False
+    last_err: Exception | None = None
+    attempts = max(1, len(config.SARVAM_KEY_POOL))
+
+    for _attempt in range(attempts):
+        key = config.SARVAM_KEY_POOL.current()
+        headers = {"Api-Subscription-Key": key}
+        try:
+            async for chunk in _synthesize_stream_once(text_chunks, speaker, url, headers):
+                got_audio = True
+                yield chunk
+            return
+        except (websockets.exceptions.InvalidStatus, websockets.exceptions.InvalidStatusCode) as e:
+            if got_audio:
+                raise
+            last_err = e
+            status = getattr(getattr(e, "response", None), "status_code", None) or getattr(e, "status_code", None)
+            if status in (401, 402, 403, 429):
+                config.SARVAM_KEY_POOL.mark_exhausted(key)
+                logger.warning("voice.sarvam_tts.key_rejected", status=status)
+                continue
+            raise
+        except RuntimeError as e:
+            # Raised below for a {"type":"error"} server message — see
+            # _synthesize_stream_once. Broad but deliberate: Sarvam's error
+            # payload shape for "out of balance" isn't documented, so rather
+            # than guess at matching specific wording, any server-reported
+            # error before real audio has flowed is treated as "this key
+            # isn't usable right now" and the pool rotates past it.
+            if got_audio:
+                raise
+            last_err = e
+            config.SARVAM_KEY_POOL.mark_exhausted(key)
+            logger.warning("voice.sarvam_tts.early_server_error", error=str(e))
+            continue
+
+    raise RuntimeError(f"Sarvam TTS: all API keys exhausted or invalid ({last_err})")
+
+
+async def _synthesize_stream_once(
+    text_chunks: AsyncIterator[str],
+    speaker: str,
+    url: str,
+    headers: dict,
+) -> AsyncIterator[bytes]:
+    """One connection attempt with one key — the original single-key
+    implementation, unchanged, just extracted so synthesize_stream can wrap
+    it in a per-key retry loop without touching this completion-race-
+    sensitive logic at all."""
     async with websockets.connect(url, additional_headers=headers) as ws:
         await ws.send(json.dumps({
             "type": "config",

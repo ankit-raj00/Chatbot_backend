@@ -3,6 +3,10 @@ throughout this codebase (e.g. rag/parsers/parser_client.py) of module-level
 constants read once from os.getenv with sane defaults."""
 import os
 
+import structlog
+
+logger = structlog.get_logger(__name__)
+
 # ── Provider selection ──────────────────────────────────────────────────
 # Sarvam is the default for both legs: it fixed a real accuracy complaint on
 # Indian-accented speech (Deepgram Flux was mishearing it) and — verified
@@ -44,6 +48,50 @@ DEEPGRAM_REST_URL = "https://api.deepgram.com/v1/listen"
 # turned out to not even be valid for bulbul:v3 (confirmed live: 422 from
 # the real API, which also usefully listed the actual valid v3 roster).
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
+# Multiple prepaid keys can be given as one comma-separated value in this
+# same env var — nothing else (GitHub secret name, merge_env.sh, deploy.yml)
+# needs to know there's more than one. Whitespace around each key is
+# stripped so "k1, k2, k3" and "k1,k2,k3" both work.
+SARVAM_API_KEYS = [k.strip() for k in SARVAM_API_KEY.split(",") if k.strip()]
+
+
+class _SarvamKeyPool:
+    """Rotates through SARVAM_API_KEYS when the current one is rejected or
+    reports it's out of balance, so a burned-through free-tier key doesn't
+    take the voice pipeline down until someone notices and swaps it by hand.
+
+    Deliberately in-memory, not persisted (Redis or otherwise) — this
+    process is single-instance already (see turn_manager.py, llm_registry.py
+    for the same "single-process, in-memory" precedent elsewhere in this
+    codebase), and the cost of NOT persisting is only ever one wasted
+    handshake against an already-dead key right after a redeploy, not a
+    correctness problem. A lock isn't needed either: mark_exhausted() only
+    ever advances the index forward and is a no-op if another concurrent
+    caller already moved past the key being reported, so a race just means
+    two callers independently agree to skip the same key.
+    """
+
+    def __init__(self, keys: list[str]):
+        self._keys = keys
+        self._i = 0
+
+    def __len__(self) -> int:
+        return len(self._keys)
+
+    def current(self) -> str:
+        return self._keys[self._i] if self._keys else ""
+
+    def mark_exhausted(self, key: str) -> None:
+        if self._keys and self._i < len(self._keys) and self._keys[self._i] == key and self._i < len(self._keys) - 1:
+            self._i += 1
+            logger.warning(
+                "voice.sarvam_key_pool.rotated",
+                remaining_keys=len(self._keys) - self._i,
+            )
+
+
+SARVAM_KEY_POOL = _SarvamKeyPool(SARVAM_API_KEYS)
+
 SARVAM_TTS_WS_URL = "wss://api.sarvam.ai/text-to-speech/ws"
 SARVAM_STT_WS_URL = "wss://api.sarvam.ai/speech-to-text/ws"
 
