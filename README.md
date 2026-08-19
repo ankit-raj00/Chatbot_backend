@@ -542,8 +542,8 @@ Two layers, running simultaneously:
 
 ## 18. Admin Analytics Dashboard
 
-`/admin/*` routes require `is_admin: true` on the user document (`403` otherwise — promote via
-`python create_admin.py` or directly in MongoDB). Drill-down hierarchy:
+`/admin/*` routes require `is_admin: true` on the user document (`403` otherwise — set the flag
+directly in MongoDB). Drill-down hierarchy:
 
 ```
 /admin  →  /admin/users  →  /admin/users/{id}/sessions  →  /admin/users/{id}/sessions/{conv_id}

@@ -24,3 +24,7 @@ cleanup_legacy.py
 
 # Personal interview-prep notes — kept locally, not published
 docs/interview-prep/
+
+# Standalone ops/E2E scripts kept locally, not part of the published project
+e2e_test.py
+create_admin.py
